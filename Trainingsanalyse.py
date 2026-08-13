@@ -23,6 +23,8 @@ Benötigte Pakete (requirements.txt):
 Start lokal:  streamlit run Trainingsanalyse.py
 """
 
+import datetime as dt
+
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -264,7 +266,28 @@ with col_import:
 
 with col_manuell:
     st.subheader("2. Manuelle Eingabe")
-    st.caption("Einzelne TSS-Werte direkt eintragen, bearbeiten oder löschen (Zeilen über '+' unten hinzufügen).")
+
+    with st.form("neue_einheit_formular", clear_on_submit=True):
+        st.caption("Neue Trainingseinheit erfassen (mit Datum, Uhrzeit und TSS):")
+        fc1, fc2, fc3 = st.columns(3)
+        with fc1:
+            neues_datum = st.date_input("Datum", value=dt.date.today(), format="DD.MM.YYYY")
+        with fc2:
+            neue_zeit = st.time_input("Uhrzeit", value=dt.time(7, 0))
+        with fc3:
+            neuer_tss = st.number_input("TSS", min_value=0.0, step=1.0, value=0.0)
+        abgeschickt = st.form_submit_button("Einheit hinzufügen", width="stretch")
+
+    if abgeschickt:
+        neue_zeile = pd.DataFrame(
+            [{"Datum": pd.Timestamp(neues_datum), "Zeit": neue_zeit, "TSS": neuer_tss}]
+        )
+        st.session_state.manuelle_eintraege = pd.concat(
+            [st.session_state.manuelle_eintraege, neue_zeile], ignore_index=True
+        )
+        st.success(f"Einheit am {neues_datum.strftime('%d.%m.%Y')} um {neue_zeit.strftime('%H:%M')} Uhr hinzugefügt.")
+
+    st.caption("Vorhandene manuelle Einträge bearbeiten oder löschen (Zeilen über '+'/Papierkorb unten):")
     st.session_state.manuelle_eintraege = st.data_editor(
         st.session_state.manuelle_eintraege,
         num_rows="dynamic",
@@ -338,6 +361,13 @@ else:
             st.pyplot(fig, width="stretch")
 
             letzter_tag = ergebnis.iloc[-1]
+            st.caption(
+                f"Stand: **{letzter_tag.name.strftime('%d.%m.%Y')}** "
+                f"(letzter Tag im oben gewählten Anzeigezeitraum). "
+                "CTL/ATL sind gleitende Mittelwerte über die jeweilige "
+                "Zeitkonstante (z.B. 42 bzw. 7 Tage) bis zu diesem Tag, "
+                "TSB ist die Differenz aus dem CTL/ATL-Stand des Vortages."
+            )
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("CTL (Fitness)", f"{letzter_tag['CTL']:.1f}")
             m2.metric("ATL (Fatigue)", f"{letzter_tag['ATL']:.1f}")
