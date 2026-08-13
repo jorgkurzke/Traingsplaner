@@ -5,8 +5,8 @@ Trainingsanalyse: ATL / CTL / TSB (Streamlit-App)
 Interaktive Streamlit-App zur Trainingssteuerung auf Basis von TSS
 (Training Stress Score):
 
-  - TSS-Werte (inkl. optionaler Uhrzeit) per Excel-Import UND/ODER manuelle
-    Eingabe erfassen
+  - TSS-Werte (inkl. optionaler Trainingsdauer) per Excel-Import UND/ODER
+    manuelle Eingabe erfassen
   - ATL  (Acute Training Load / "Fatigue")   - Zeitkonstante frei wählbar
   - CTL  (Chronic Training Load / "Fitness") - Zeitkonstante frei wählbar
   - TSB  (Training Stress Balance / "Form")  = CTL - ATL
@@ -48,7 +48,7 @@ if "manuelle_eintraege" not in st.session_state:
     st.session_state.manuelle_eintraege = pd.DataFrame(
         {
             "Datum": pd.Series(dtype="datetime64[ns]"),
-            "Zeit": pd.Series(dtype="object"),
+            "Dauer": pd.Series(dtype="object"),  # Trainingsdauer als datetime.time (hh:mm)
             "TSS": pd.Series(dtype="float"),
         }
     )
@@ -96,20 +96,63 @@ def tsb_bereich_zuordnen(tsb_wert, bereiche_eff):
     return "unbekannt"
 
 
+def dauer_zu_minuten(wert):
+    """Wandelt einen Dauer-Wert (datetime.time, timedelta, 'hh:mm'-String
+    oder Dezimalstunden als Zahl) in Minuten um. Leere/ungültige Werte -> 0."""
+    if wert is None:
+        return 0.0
+    try:
+        if pd.isna(wert):
+            return 0.0
+    except (TypeError, ValueError):
+        pass
+    if isinstance(wert, dt.timedelta):
+        return wert.total_seconds() / 60.0
+    if isinstance(wert, dt.time):
+        return wert.hour * 60 + wert.minute + wert.second / 60.0
+    if isinstance(wert, pd.Timestamp):
+        return wert.hour * 60 + wert.minute + wert.second / 60.0
+    if isinstance(wert, str):
+        s = wert.strip()
+        if ":" in s:
+            teile = s.split(":")
+            try:
+                h = int(teile[0])
+                m = int(teile[1]) if len(teile) > 1 else 0
+                return h * 60 + m
+            except ValueError:
+                return 0.0
+        try:
+            return float(s.replace(",", ".")) * 60.0  # Dezimalstunden, z.B. "1,5" -> 90 Min
+        except ValueError:
+            return 0.0
+    if isinstance(wert, (int, float)):
+        return float(wert) * 60.0  # Dezimalstunden, z.B. 1.5 -> 90 Min
+    return 0.0
+
+
+def minuten_zu_hhmm(minuten):
+    """Formatiert eine Minutenanzahl als 'hh:mm'-String (auch > 24h möglich)."""
+    minuten = int(round(minuten))
+    return f"{minuten // 60:02d}:{minuten % 60:02d}"
+
+
 def tagesreihe_aufbauen(df_tss):
-    """Nimmt ein DataFrame mit Spalten Datum/TSS, summiert Mehrfacheinträge
-    pro Tag und füllt fehlende Tage mit TSS=0 (lückenlose Tagesreihe -
-    wichtig, damit ATL/CTL bei Trainingspausen korrekt abklingen)."""
+    """Nimmt ein DataFrame mit Spalten Datum/Dauer/TSS, summiert Mehrfach-
+    einträge pro Tag und füllt fehlende Tage mit TSS=0/Dauer=0 (lückenlose
+    Tagesreihe - wichtig, damit ATL/CTL bei Trainingspausen korrekt
+    abklingen)."""
     df = df_tss.dropna(subset=["Datum"]).copy()
     df["Datum"] = pd.to_datetime(df["Datum"])
     df["TSS"] = pd.to_numeric(df["TSS"], errors="coerce").fillna(0)
+    df["Dauer_min"] = df["Dauer"].apply(dauer_zu_minuten) if "Dauer" in df.columns else 0.0
     if len(df) == 0:
         return None
-    s = df.groupby("Datum")["TSS"].sum().sort_index()
-    alle_tage = pd.date_range(s.index.min(), s.index.max(), freq="D")
-    s = s.reindex(alle_tage, fill_value=0)
-    s.index.name = "Datum"
-    return s.to_frame("TSS")
+    tag_gruppe = df.groupby("Datum").agg(TSS=("TSS", "sum"), Dauer_min=("Dauer_min", "sum")).sort_index()
+    alle_tage = pd.date_range(tag_gruppe.index.min(), tag_gruppe.index.max(), freq="D")
+    tag_gruppe = tag_gruppe.reindex(alle_tage, fill_value=0)
+    tag_gruppe.index.name = "Datum"
+    return tag_gruppe
 
 
 def berechne_atl_ctl_tsb(df, atl_tage, ctl_tage, ctl_start=0.0, atl_start=0.0):
@@ -229,7 +272,7 @@ with col_import:
     df_import = pd.DataFrame(
         {
             "Datum": pd.Series(dtype="datetime64[ns]"),
-            "Zeit": pd.Series(dtype="object"),
+            "Dauer": pd.Series(dtype="object"),
             "TSS": pd.Series(dtype="float"),
         }
     )
@@ -243,7 +286,7 @@ with col_import:
             spalten = list(df_roh.columns)
             datum_default = next((c for c in spalten if "datum" in str(c).lower() or "date" in str(c).lower()), spalten[0])
             tss_default = next((c for c in spalten if "tss" in str(c).lower()), spalten[-1])
-            zeit_default = next((c for c in spalten if "zeit" in str(c).lower() or "uhrzeit" in str(c).lower() or "time" in str(c).lower()), None)
+            dauer_default = next((c for c in spalten if "dauer" in str(c).lower() or "duration" in str(c).lower() or "zeit" in str(c).lower()), None)
 
             c1, c2, c3 = st.columns(3)
             with c1:
@@ -251,15 +294,15 @@ with col_import:
             with c2:
                 spalte_tss = st.selectbox("Spalte mit TSS", spalten, index=spalten.index(tss_default))
             with c3:
-                zeit_optionen = ["(keine)"] + spalten
-                zeit_index = zeit_optionen.index(zeit_default) if zeit_default else 0
-                spalte_zeit = st.selectbox("Spalte mit Uhrzeit (optional)", zeit_optionen, index=zeit_index)
+                dauer_optionen = ["(keine)"] + spalten
+                dauer_index = dauer_optionen.index(dauer_default) if dauer_default else 0
+                spalte_dauer = st.selectbox("Spalte mit Trainingsdauer (optional, hh:mm)", dauer_optionen, index=dauer_index)
 
             df_import = df_roh[[spalte_datum, spalte_tss]].rename(columns={spalte_datum: "Datum", spalte_tss: "TSS"})
-            if spalte_zeit != "(keine)":
-                df_import["Zeit"] = df_roh[spalte_zeit]
+            if spalte_dauer != "(keine)":
+                df_import["Dauer"] = df_roh[spalte_dauer]
             else:
-                df_import["Zeit"] = None
+                df_import["Dauer"] = None
             st.success(f"{len(df_import)} Zeilen aus '{hochgeladene_datei.name}' eingelesen.")
         except Exception as e:
             st.error(f"Datei konnte nicht gelesen werden: {e}")
@@ -268,24 +311,27 @@ with col_manuell:
     st.subheader("2. Manuelle Eingabe")
 
     with st.form("neue_einheit_formular", clear_on_submit=True):
-        st.caption("Neue Trainingseinheit erfassen (mit Datum, Uhrzeit und TSS):")
+        st.caption("Neue Trainingseinheit erfassen (mit Datum, Trainingsdauer und TSS):")
         fc1, fc2, fc3 = st.columns(3)
         with fc1:
             neues_datum = st.date_input("Datum", value=dt.date.today(), format="DD.MM.YYYY")
         with fc2:
-            neue_zeit = st.time_input("Uhrzeit", value=dt.time(7, 0))
+            neue_dauer = st.time_input("Trainingsdauer (hh:mm)", value=dt.time(1, 0), step=60)
         with fc3:
             neuer_tss = st.number_input("TSS", min_value=0.0, step=1.0, value=0.0)
         abgeschickt = st.form_submit_button("Einheit hinzufügen", width="stretch")
 
     if abgeschickt:
         neue_zeile = pd.DataFrame(
-            [{"Datum": pd.Timestamp(neues_datum), "Zeit": neue_zeit, "TSS": neuer_tss}]
+            [{"Datum": pd.Timestamp(neues_datum), "Dauer": neue_dauer, "TSS": neuer_tss}]
         )
         st.session_state.manuelle_eintraege = pd.concat(
             [st.session_state.manuelle_eintraege, neue_zeile], ignore_index=True
         )
-        st.success(f"Einheit am {neues_datum.strftime('%d.%m.%Y')} um {neue_zeit.strftime('%H:%M')} Uhr hinzugefügt.")
+        st.success(
+            f"Einheit am {neues_datum.strftime('%d.%m.%Y')} "
+            f"({neue_dauer.strftime('%H:%M')} h) hinzugefügt."
+        )
 
     st.caption("Vorhandene manuelle Einträge bearbeiten oder löschen (Zeilen über '+'/Papierkorb unten):")
     st.session_state.manuelle_eintraege = st.data_editor(
@@ -294,10 +340,10 @@ with col_manuell:
         width="stretch",
         column_config={
             "Datum": st.column_config.DateColumn("Datum", format="DD.MM.YYYY"),
-            "Zeit": st.column_config.TimeColumn("Zeit", format="HH:mm"),
+            "Dauer": st.column_config.TimeColumn("Dauer (hh:mm)", format="HH:mm", step=60),
             "TSS": st.column_config.NumberColumn("TSS", min_value=0.0, step=1.0),
         },
-        column_order=["Datum", "Zeit", "TSS"],
+        column_order=["Datum", "Dauer", "TSS"],
         key="manuelle_eintraege_editor",
     )
 
@@ -379,15 +425,39 @@ else:
                 (pd.to_datetime(df_kombiniert["Datum"]).dt.date >= start_datum)
                 & (pd.to_datetime(df_kombiniert["Datum"]).dt.date <= end_datum)
             ].copy()
-            rohdaten = rohdaten.sort_values(["Datum", "Zeit"])[["Datum", "Zeit", "TSS"]]
+            rohdaten = rohdaten.sort_values(["Datum", "Dauer"])[["Datum", "Dauer", "TSS"]]
             st.dataframe(rohdaten, width="stretch", hide_index=True)
 
             st.subheader("Tagesauswertung (ATL / CTL / TSB)")
-            st.dataframe(ergebnis.round(2), width="stretch")
+
+            # Dauer als hh:mm-Spalte direkt nach Datum einfügen
+            ergebnis_anzeige = ergebnis.round(2).copy()
+            ergebnis_anzeige.insert(0, "Dauer", ergebnis_anzeige["Dauer_min"].apply(minuten_zu_hhmm))
+            ergebnis_anzeige = ergebnis_anzeige.drop(columns=["Dauer_min"])
+
+            # Fixierte Summenzeile oberhalb der (scrollbaren) Tabelle - eine
+            # echte "frozen row" innerhalb einer einzelnen Tabelle bietet
+            # Streamlit nicht an, daher als eigene, nicht scrollende Zeile
+            # direkt über der Tabelle dargestellt.
+            summe_dauer = minuten_zu_hhmm(ergebnis["Dauer_min"].sum())
+            summe_tss = round(ergebnis["TSS"].sum(), 1)
+            summenzeile = pd.DataFrame(
+                [{
+                    "Datum": "Summe",
+                    "Dauer": summe_dauer,
+                    "TSS": summe_tss,
+                    "CTL": "–",
+                    "ATL": "–",
+                    "TSB": "–",
+                    "TSB_Bereich": "–",
+                }]
+            )
+            st.dataframe(summenzeile, width="stretch", hide_index=True)
+            st.dataframe(ergebnis_anzeige, width="stretch")
 
             excel_puffer = pd.ExcelWriter("ergebnis_export.xlsx", engine="openpyxl")
             rohdaten.to_excel(excel_puffer, sheet_name="Trainingseinheiten", index=False)
-            ergebnis.round(2).to_excel(excel_puffer, sheet_name="Tagesauswertung")
+            ergebnis_anzeige.to_excel(excel_puffer, sheet_name="Tagesauswertung")
             excel_puffer.close()
             with open("ergebnis_export.xlsx", "rb") as f:
                 st.download_button(
