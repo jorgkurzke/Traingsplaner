@@ -6,7 +6,9 @@ Interaktive Streamlit-App zur Trainingssteuerung auf Basis von TSS
 (Training Stress Score):
 
   - TSS-Werte (inkl. optionaler Trainingsdauer) per Excel-Import UND/ODER
-    manuelle Eingabe erfassen
+    manuelle Eingabe erfassen; importierte Daten werden auf Wunsch
+    dauerhaft in der App gespeichert (siehe GESPEICHERTE_IMPORT_DATEI),
+    ein erneutes Hochladen ist danach nicht mehr nötig
   - ATL  (Acute Training Load / "Fatigue")   - Zeitkonstante frei wählbar
   - CTL  (Chronic Training Load / "Fitness") - Zeitkonstante frei wählbar
   - TSB  (Training Stress Balance / "Form")  = CTL - ATL
@@ -24,12 +26,17 @@ Start lokal:  streamlit run Trainingsanalyse.py
 """
 
 import datetime as dt
+import os
 
 import numpy as np
 import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+
+# Datei, in der importierte Excel-Daten dauerhaft (über Session/Neuladen
+# hinweg) gespeichert werden. Liegt im Arbeitsverzeichnis der App.
+GESPEICHERTE_IMPORT_DATEI = "gespeicherte_importe.csv"
 
 
 st.set_page_config(page_title="Trainingsanalyse: ATL / CTL / TSB", layout="wide")
@@ -41,8 +48,46 @@ st.caption(
 
 
 # =====================================================================
+# Persistenz für importierte Daten (überlebt Reruns UND - solange die
+# Datei auf der Festplatte der App erhalten bleibt - auch ein Neuladen
+# der Seite oder ein Aufwachen aus dem Schlafmodus)
+# =====================================================================
+
+def leere_eintraege():
+    return pd.DataFrame(
+        {
+            "Datum": pd.Series(dtype="datetime64[ns]"),
+            "Dauer": pd.Series(dtype="object"),
+            "TSS": pd.Series(dtype="float"),
+        }
+    )
+
+
+def importierte_daten_laden():
+    """Lädt zuvor gespeicherte Import-Daten von der Festplatte, falls
+    vorhanden. Bei fehlender/fehlerhafter Datei: leere Tabelle."""
+    if os.path.exists(GESPEICHERTE_IMPORT_DATEI):
+        try:
+            df = pd.read_csv(GESPEICHERTE_IMPORT_DATEI)
+            df["Datum"] = pd.to_datetime(df["Datum"])
+            return df
+        except Exception:
+            pass
+    return leere_eintraege()
+
+
+def importierte_daten_speichern(df):
+    """Schreibt die aktuellen Import-Daten dauerhaft auf die Festplatte,
+    damit sie beim nächsten Start/Neuladen der App wieder verfügbar sind."""
+    df.to_csv(GESPEICHERTE_IMPORT_DATEI, index=False)
+
+
+# =====================================================================
 # Session State initialisieren
 # =====================================================================
+
+if "importierte_eintraege" not in st.session_state:
+    st.session_state.importierte_eintraege = importierte_daten_laden()
 
 if "manuelle_eintraege" not in st.session_state:
     st.session_state.manuelle_eintraege = pd.DataFrame(
@@ -304,15 +349,17 @@ col_import, col_manuell = st.columns(2)
 
 with col_import:
     st.subheader("1. Excel-Import")
+
+    if len(st.session_state.importierte_eintraege) > 0:
+        st.caption(
+            f"Aktuell {len(st.session_state.importierte_eintraege)} importierte Zeilen "
+            "dauerhaft in der App gespeichert - dafür muss keine Excel-Datei mehr "
+            "hochgeladen werden."
+        )
+
     hochgeladene_datei = st.file_uploader("Excel-Datei mit TSS-Werten", type=["xlsx", "xls"])
 
-    df_import = pd.DataFrame(
-        {
-            "Datum": pd.Series(dtype="datetime64[ns]"),
-            "Dauer": pd.Series(dtype="object"),
-            "TSS": pd.Series(dtype="float"),
-        }
-    )
+    df_import = leere_eintraege()
 
     if hochgeladene_datei is not None:
         try:
@@ -341,8 +388,36 @@ with col_import:
             else:
                 df_import["Dauer"] = None
             st.success(f"{len(df_import)} Zeilen aus '{hochgeladene_datei.name}' eingelesen.")
+
+            if st.button("Importierte Daten dauerhaft in der App speichern", width="stretch"):
+                kombiniert = pd.concat(
+                    [st.session_state.importierte_eintraege, df_import], ignore_index=True
+                )
+                kombiniert = (
+                    kombiniert.dropna(subset=["Datum"])
+                    .drop_duplicates(keep="first")
+                    .sort_values("Datum")
+                    .reset_index(drop=True)
+                )
+                st.session_state.importierte_eintraege = kombiniert
+                importierte_daten_speichern(kombiniert)
+                st.success(
+                    f"Gespeichert. Insgesamt {len(kombiniert)} importierte Zeilen liegen "
+                    "jetzt dauerhaft in der App - die Excel-Datei muss dafür nicht "
+                    "erneut hochgeladen werden."
+                )
         except Exception as e:
             st.error(f"Datei konnte nicht gelesen werden: {e}")
+
+    if len(st.session_state.importierte_eintraege) > 0:
+        with st.expander(f"Gespeicherte Import-Daten verwalten ({len(st.session_state.importierte_eintraege)} Zeilen)"):
+            st.dataframe(st.session_state.importierte_eintraege, width="stretch", hide_index=True)
+            if st.button("Gespeicherte Import-Daten löschen", width="stretch"):
+                st.session_state.importierte_eintraege = leere_eintraege()
+                if os.path.exists(GESPEICHERTE_IMPORT_DATEI):
+                    os.remove(GESPEICHERTE_IMPORT_DATEI)
+                st.success("Gespeicherte Import-Daten gelöscht.")
+                st.rerun()
 
 with col_manuell:
     st.subheader("2. Manuelle Eingabe")
@@ -392,13 +467,18 @@ with col_manuell:
 # Daten kombinieren, berechnen, anzeigen
 # =====================================================================
 
-df_kombiniert = pd.concat([df_import, st.session_state.manuelle_eintraege], ignore_index=True)
+df_kombiniert = pd.concat(
+    [st.session_state.importierte_eintraege, st.session_state.manuelle_eintraege], ignore_index=True
+)
 df_kombiniert = df_kombiniert.dropna(subset=["Datum"])
 
 st.divider()
 
 if len(df_kombiniert) == 0:
-    st.info("Noch keine Daten vorhanden. Excel-Datei importieren oder oben rechts manuell TSS-Werte eintragen.")
+    st.info(
+        "Noch keine Daten vorhanden. Excel-Datei importieren und mit dem Button "
+        "speichern, oder oben rechts manuell TSS-Werte eintragen."
+    )
 else:
     tagesreihe = tagesreihe_aufbauen(df_kombiniert)
 
@@ -513,7 +593,6 @@ else:
                     file_name="tss_atl_ctl_tsb_ergebnis.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
-
 
 
 
