@@ -137,6 +137,17 @@ def minuten_zu_hhmm(minuten):
     return f"{minuten // 60:02d}:{minuten % 60:02d}"
 
 
+def dauer_anzeige(wert):
+    """Formatiert einen einzelnen Dauer-Wert für die Anzeige als 'hh:mm'
+    (leer, falls keine Trainingszeit angegeben wurde)."""
+    try:
+        if wert is None or pd.isna(wert):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    return minuten_zu_hhmm(dauer_zu_minuten(wert))
+
+
 def hex_zu_rgba(hex_farbe, alpha=0.28):
     """Wandelt eine Hex-Farbe (#rrggbb) in einen rgba(...)-CSS-String um."""
     h = str(hex_farbe).lstrip("#")
@@ -322,7 +333,7 @@ with col_import:
             with c3:
                 dauer_optionen = ["(keine)"] + spalten
                 dauer_index = dauer_optionen.index(dauer_default) if dauer_default else 0
-                spalte_dauer = st.selectbox("Spalte mit Trainingsdauer (optional, hh:mm)", dauer_optionen, index=dauer_index)
+                spalte_dauer = st.selectbox("Spalte mit Trainingszeit (optional, hh:mm)", dauer_optionen, index=dauer_index)
 
             df_import = df_roh[[spalte_datum, spalte_tss]].rename(columns={spalte_datum: "Datum", spalte_tss: "TSS"})
             if spalte_dauer != "(keine)":
@@ -337,12 +348,12 @@ with col_manuell:
     st.subheader("2. Manuelle Eingabe")
 
     with st.form("neue_einheit_formular", clear_on_submit=True):
-        st.caption("Neue Trainingseinheit erfassen (mit Datum, Trainingsdauer und TSS):")
+        st.caption("Neue Trainingseinheit erfassen (mit Datum, Trainingszeit und TSS):")
         fc1, fc2, fc3 = st.columns(3)
         with fc1:
             neues_datum = st.date_input("Datum", value=dt.date.today(), format="DD.MM.YYYY")
         with fc2:
-            neue_dauer = st.time_input("Trainingsdauer (hh:mm)", value=dt.time(1, 0), step=60)
+            neue_dauer = st.time_input("Trainingszeit (hh:mm)", value=dt.time(1, 0), step=60)
         with fc3:
             neuer_tss = st.number_input("TSS", min_value=0.0, step=1.0, value=0.0)
         abgeschickt = st.form_submit_button("Einheit hinzufügen", width="stretch")
@@ -366,7 +377,7 @@ with col_manuell:
         width="stretch",
         column_config={
             "Datum": st.column_config.DateColumn("Datum", format="DD.MM.YYYY"),
-            "Dauer": st.column_config.TimeColumn("Dauer (hh:mm)", format="HH:mm", step=60),
+            "Dauer": st.column_config.TimeColumn("Trainingszeit (hh:mm)", format="HH:mm", step=60),
             "TSS": st.column_config.NumberColumn("TSS", min_value=0.0, step=1.0),
         },
         column_order=["Datum", "Dauer", "TSS"],
@@ -446,19 +457,22 @@ else:
             m3.metric("TSB (Form)", f"{letzter_tag['TSB']:.1f}")
             m4.metric("Bereich", letzter_tag["TSB_Bereich"])
 
-            st.subheader("Erfasste Trainingseinheiten")
             rohdaten = df_kombiniert[
                 (pd.to_datetime(df_kombiniert["Datum"]).dt.date >= start_datum)
                 & (pd.to_datetime(df_kombiniert["Datum"]).dt.date <= end_datum)
             ].copy()
             rohdaten = rohdaten.sort_values(["Datum", "Dauer"])[["Datum", "Dauer", "TSS"]]
-            st.dataframe(rohdaten, width="stretch", hide_index=True)
+            rohdaten_anzeige = rohdaten.copy()
+            rohdaten_anzeige["Dauer"] = rohdaten_anzeige["Dauer"].apply(dauer_anzeige)
+            rohdaten_anzeige = rohdaten_anzeige.rename(columns={"Dauer": "Trainingszeit (hh:mm)"})
+            with st.expander("Erfasste Trainingseinheiten", expanded=False):
+                st.dataframe(rohdaten_anzeige, width="stretch", hide_index=True)
 
             st.subheader("Tagesauswertung (ATL / CTL / TSB)")
 
-            # Dauer als hh:mm-Spalte direkt nach Datum einfügen
+            # Trainingszeit als hh:mm-Spalte direkt nach Datum einfügen
             ergebnis_anzeige = ergebnis.round(2).copy()
-            ergebnis_anzeige.insert(0, "Dauer", ergebnis_anzeige["Dauer_min"].apply(minuten_zu_hhmm))
+            ergebnis_anzeige.insert(0, "Trainingszeit (hh:mm)", ergebnis_anzeige["Dauer_min"].apply(minuten_zu_hhmm))
             ergebnis_anzeige = ergebnis_anzeige.drop(columns=["Dauer_min"])
 
             # Fixierte Summenzeile oberhalb der (scrollbaren) Tabelle - eine
@@ -470,7 +484,7 @@ else:
             summenzeile = pd.DataFrame(
                 [{
                     "Datum": "Summe",
-                    "Dauer": summe_dauer,
+                    "Trainingszeit (hh:mm)": summe_dauer,
                     "TSS": summe_tss,
                     "CTL": "–",
                     "ATL": "–",
@@ -486,7 +500,7 @@ else:
             st.caption("Die Zeilenfarbe entspricht dem TSB-Bereich des jeweiligen Tages (gleiche Farben wie die Zonen im TSB-Diagramm oben).")
 
             excel_puffer = pd.ExcelWriter("ergebnis_export.xlsx", engine="openpyxl")
-            rohdaten.to_excel(excel_puffer, sheet_name="Trainingseinheiten", index=False)
+            rohdaten_anzeige.to_excel(excel_puffer, sheet_name="Trainingseinheiten", index=False)
             ergebnis_anzeige.to_excel(excel_puffer, sheet_name="Tagesauswertung")
             excel_puffer.close()
             with open("ergebnis_export.xlsx", "rb") as f:
@@ -496,7 +510,6 @@ else:
                     file_name="tss_atl_ctl_tsb_ergebnis.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
-
 
 
 
