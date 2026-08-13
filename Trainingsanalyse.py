@@ -359,15 +359,16 @@ with col_manuell:
         abgeschickt = st.form_submit_button("Einheit hinzufügen", width="stretch")
 
     if abgeschickt:
+        neue_dauer_hhmm = f"{neue_dauer.hour:02d}:{neue_dauer.minute:02d}"
         neue_zeile = pd.DataFrame(
-            [{"Datum": pd.Timestamp(neues_datum), "Dauer": neue_dauer, "TSS": neuer_tss}]
+            [{"Datum": pd.Timestamp(neues_datum), "Dauer": neue_dauer_hhmm, "TSS": neuer_tss}]
         )
         st.session_state.manuelle_eintraege = pd.concat(
             [st.session_state.manuelle_eintraege, neue_zeile], ignore_index=True
         )
         st.success(
             f"Einheit am {neues_datum.strftime('%d.%m.%Y')} "
-            f"({neue_dauer.strftime('%H:%M')} h) hinzugefügt."
+            f"({neue_dauer_hhmm} h) hinzugefügt."
         )
 
     st.caption("Vorhandene manuelle Einträge bearbeiten oder löschen (Zeilen über '+'/Papierkorb unten):")
@@ -377,7 +378,9 @@ with col_manuell:
         width="stretch",
         column_config={
             "Datum": st.column_config.DateColumn("Datum", format="DD.MM.YYYY"),
-            "Dauer": st.column_config.TimeColumn("Trainingszeit (hh:mm)", format="HH:mm", step=60),
+            "Dauer": st.column_config.TextColumn(
+                "Trainingsdauer (hh:mm)", help="Format hh:mm, z.B. 1:30 für 1 Stunde 30 Minuten"
+            ),
             "TSS": st.column_config.NumberColumn("TSS", min_value=0.0, step=1.0),
         },
         column_order=["Datum", "Dauer", "TSS"],
