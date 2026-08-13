@@ -137,6 +137,32 @@ def minuten_zu_hhmm(minuten):
     return f"{minuten // 60:02d}:{minuten % 60:02d}"
 
 
+def hex_zu_rgba(hex_farbe, alpha=0.28):
+    """Wandelt eine Hex-Farbe (#rrggbb) in einen rgba(...)-CSS-String um."""
+    h = str(hex_farbe).lstrip("#")
+    if len(h) != 6:
+        return f"rgba(200,200,200,{alpha})"
+    try:
+        r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    except ValueError:
+        return f"rgba(200,200,200,{alpha})"
+    return f"rgba({r},{g},{b},{alpha})"
+
+
+def zeilen_nach_tsb_bereich_faerben(tabelle, bereiche_eff):
+    """Gibt einen pandas Styler zurück, der jede Zeile passend zu ihrem
+    TSB-Bereich einfärbt (gleiche Farben wie im Diagramm)."""
+    farb_map = dict(zip(bereiche_eff["label"], bereiche_eff["farbe"])) if len(bereiche_eff) > 0 else {}
+
+    def zeile_stylen(zeile):
+        farbe = farb_map.get(zeile.get("TSB_Bereich"))
+        if farbe:
+            return [f"background-color: {hex_zu_rgba(farbe)}"] * len(zeile)
+        return [""] * len(zeile)
+
+    return tabelle.style.apply(zeile_stylen, axis=1)
+
+
 def tagesreihe_aufbauen(df_tss):
     """Nimmt ein DataFrame mit Spalten Datum/Dauer/TSS, summiert Mehrfach-
     einträge pro Tag und füllt fehlende Tage mit TSS=0/Dauer=0 (lückenlose
@@ -453,7 +479,11 @@ else:
                 }]
             )
             st.dataframe(summenzeile, width="stretch", hide_index=True)
-            st.dataframe(ergebnis_anzeige, width="stretch")
+            st.dataframe(
+                zeilen_nach_tsb_bereich_faerben(ergebnis_anzeige, bereiche_eff),
+                width="stretch",
+            )
+            st.caption("Die Zeilenfarbe entspricht dem TSB-Bereich des jeweiligen Tages (gleiche Farben wie die Zonen im TSB-Diagramm oben).")
 
             excel_puffer = pd.ExcelWriter("ergebnis_export.xlsx", engine="openpyxl")
             rohdaten.to_excel(excel_puffer, sheet_name="Trainingseinheiten", index=False)
