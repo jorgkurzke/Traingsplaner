@@ -1,323 +1,240 @@
-import streamlit as st
-import gpxpy
-import gpxpy.gpx
+"""
+TSS / ATL / CTL / TSB - Analyse und Visualisierung
+====================================================
+
+Liest tägliche TSS-Werte (Training Stress Score) aus einer Excel-Datei ein
+und berechnet daraus:
+
+  - ATL  (Acute Training Load / akute Belastung, "Fatigue")
+  - CTL  (Chronic Training Load / chronische Belastung, "Fitness")
+  - TSB  (Training Stress Balance, "Form")   TSB = CTL - ATL
+
+ATL und CTL werden als exponentiell gleitender Mittelwert (EWMA) berechnet:
+
+    Wert_heute = Wert_gestern + (TSS_heute - Wert_gestern) / Zeitkonstante
+
+Die Zeitkonstanten sind frei wählbar (Standard: ATL = 7 Tage, CTL = 42 Tage,
+klassische Coggan-Werte) - siehe Konfigurationsblock unten.
+
+Die TSB-Bereiche (z.B. "Übertrainingsrisiko", "optimale Form", "Frische")
+sind ebenfalls frei definierbar und werden im Diagramm als farbige Zonen
+im Hintergrund dargestellt.
+
+Benötigte Pakete: pandas, matplotlib, openpyxl
+    pip install pandas matplotlib openpyxl --break-system-packages
+"""
+
+import numpy as np
 import pandas as pd
-from datetime import datetime, timedelta
-import math
-import io
-
-# ------------------------------------------------------------
-# Hilfsfunktionen
-# ------------------------------------------------------------
-
-def haversine(lat1, lon1, lat2, lon2):
-    R = 6371000
-    phi1, phi2 = math.radians(lat1), math.radians(lat2)
-    dphi = math.radians(lat2 - lat1)
-    dlambda = math.radians(lon2 - lon1)
-
-    a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlambda/2)**2
-    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
-    return R * c
-
-
-def gpx_to_df(gpx_file):
-    gpx = gpxpy.parse(gpx_file)
-    points = []
-
-    for track in gpx.tracks:
-        for segment in track.segments:
-            for p in segment.points:
-                points.append({
-                    "time": p.time.replace(tzinfo=None),
-                    "lat": p.latitude,
-                    "lon": p.longitude,
-                    "ele": p.elevation
-                })
-
-    df = pd.DataFrame(points)
-    df = df.sort_values("time").reset_index(drop=True)
-
-    # Distanz berechnen
-    dists = [0.0]
-    for i in range(1, len(df)):
-        d = haversine(df.loc[i-1, "lat"], df.loc[i-1, "lon"],
-                      df.loc[i, "lat"], df.loc[i, "lon"])
-        dists.append(d)
-
-    df["dist_m"] = dists
-    df["dist_km_cum"] = df["dist_m"].cumsum() / 1000.0
-    return df
-
-
-def compute_stand_times(df):
-    """Berechnet Standzeiten (Stopps) zwischen Punkten im GPX."""
-    stand_times = [0]
-    for i in range(1, len(df)):
-        dt = (df.loc[i, "time"] - df.loc[i-1, "time"]).total_seconds()
-        d = df.loc[i, "dist_m"]
-        stand_times.append(dt if d < 1 else 0)
-    df["stand_seconds"] = stand_times
-    return df
-
-
-def compute_gradient(df):
-    """Berechnet Steigung in % zwischen Punkten."""
-    gradients = [0]
-    for i in range(1, len(df)):
-        ele_diff = df.loc[i, "ele"] - df.loc[i-1, "ele"]
-        dist = df.loc[i, "dist_m"]
-        gradients.append((ele_diff / dist) * 100 if dist > 0 else 0)
-    df["gradient"] = gradients
-    return df
-
-
-def interpolate_time_at_distance(df, target_km):
-    if target_km <= df["dist_km_cum"].iloc[0]:
-        return df["time"].iloc[0]
-    if target_km >= df["dist_km_cum"].iloc[-1]:
-        return df["time"].iloc[-1]
-
-    before = df[df["dist_km_cum"] <= target_km].iloc[-1]
-    after = df[df["dist_km_cum"] >= target_km].iloc[0]
-
-    if before["dist_km_cum"] == after["dist_km_cum"]:
-        return before["time"]
-
-    ratio = ((target_km - before["dist_km_cum"]) /
-             (after["dist_km_cum"] - before["dist_km_cum"]))
-    dt = after["time"] - before["time"]
-    return before["time"] + ratio * dt
-
-
-def stand_time_between(df, km_start, km_end):
-    segment = df[(df["dist_km_cum"] >= km_start) & (df["dist_km_cum"] < km_end)]
-    return segment["stand_seconds"].sum()
-
-def fmt_speed(v):
-    if v is None:
-        return ""
-    return f"{v:.1f}".replace(".", ",")
-
-def speed_by_gradient(df, km_start, km_end):
-    """Berechnet Geschwindigkeiten nach Steigungskategorien ohne Pausen/Standzeiten."""
-    segment = df[(df["dist_km_cum"] >= km_start) & (df["dist_km_cum"] < km_end)]
-
-    def calc_speed(mask):
-        seg = segment[mask]
-        if len(seg) < 2:
-            return None  # keine Daten → Zelle leer
-
-        speeds = []
-        weights = []
-
-        for i in range(1, len(seg)):
-            dt = (seg.iloc[i]["time"] - seg.iloc[i-1]["time"]).total_seconds()
-            dist = seg.iloc[i]["dist_m"]
-
-            # Pausen ignorieren
-            if dt <= 0 or dist <= 0:
-                continue
-
-            v = (dist / 1000.0) / (dt / 3600.0)  # km/h
-            speeds.append(v)
-            weights.append(dist)
-
-        if not speeds:
-            return None
-
-        # distanzgewichteter Mittelwert
-        return sum(s * w for s, w in zip(speeds, weights)) / sum(weights)
-
-    speed_down = calc_speed(segment["gradient"] < -6)
-    speed_light_down = calc_speed((segment["gradient"] < 0) & (segment["gradient"] >= -6))
-    speed_flat = calc_speed((segment["gradient"] >= 0) & (segment["gradient"] <= 2))
-    speed_light_up = calc_speed((segment["gradient"] > 2) & (segment["gradient"] <= 6))
-    speed_medium_up = calc_speed((segment["gradient"] > 6) & (segment["gradient"] <= 8))
-    speed_steep_up = calc_speed((segment["gradient"] > 8) & (segment["gradient"] <= 10))
-    speed_very_steep_up = calc_speed(segment["gradient"] > 10)
-
-    return (
-        speed_down,
-        speed_light_down,
-        speed_flat,
-        speed_light_up,
-        speed_medium_up,
-        speed_steep_up,
-        speed_very_steep_up
-    )
-
-
-
-
-def format_hhmm(hours_float):
-    total_minutes = int(hours_float * 60)
-    hh = total_minutes // 60
-    mm = total_minutes % 60
-    return f"{hh:02d}:{mm:02d}"
-
-
-# ------------------------------------------------------------
-# Streamlit App
-# ------------------------------------------------------------
-
-st.title("GPS-Track Analyse")
-
-uploaded_file = st.file_uploader("GPX-Datei hochladen", type=["gpx"], key="gpx_upload")
-
-if uploaded_file is not None:
-    df = gpx_to_df(uploaded_file)
-    df = compute_stand_times(df)
-    df = compute_gradient(df)
-
-    st.success(f"Track geladen: {len(df)} Punkte, {df['dist_km_cum'].iloc[-1]:.1f} km")
-
-    default_start = df["time"].iloc[0]
-    start_time = st.time_input("Startzeit", default_start.time())
-    start_date = st.date_input("Startdatum", default_start.date())
-    start_datetime = datetime.combine(start_date, start_time)
-
-    max_dist = df["dist_km_cum"].iloc[-1]
-
-    st.subheader("Kontrollpunkte aus Excel laden")
-
-    excel_file = st.file_uploader(
-        "Excel-Datei mit Kontrollpunkten (Spalten: km, name)",
-        type=["xlsx", "xls"],
-        key="excel_controls"
-    )
-
-    controls = []
-
-    if excel_file is not None:
-        try:
-            df_controls = pd.read_excel(excel_file, engine="openpyxl")
-            if "km" not in df_controls.columns or "name" not in df_controls.columns:
-                st.error("Excel muss die Spalten 'km' und 'name' enthalten.")
-            else:
-                for _, row in df_controls.iterrows():
-                    controls.append({"km": float(row["km"]), "name": str(row["name"])})
-                st.success(f"{len(controls)} Kontrollpunkte aus Excel geladen.")
-        except Exception as e:
-            st.error(f"Fehler beim Lesen der Excel-Datei: {e}")
-
-    if len(controls) == 0:
-        st.info("Keine Excel-Datei geladen – Kontrollpunkte manuell eingeben.")
-        num_points = st.number_input("Anzahl Kontrollpunkte", min_value=1, max_value=30, value=3)
-
-        for i in range(num_points):
-            col1, col2 = st.columns(2)
-            with col1:
-                dist = st.number_input(
-                    f"Distanz Punkt {i+1} (km)",
-                    min_value=0.0,
-                    max_value=float(max_dist),
-                    value=min(float(max_dist), (i+1)*50.0),
-                    key=f"dist_{i}"
-                )
-            with col2:
-                name = st.text_input(
-                    f"Name Punkt {i+1}",
-                    value=f"Punkt {i+1}",
-                    key=f"name_{i}"
-                )
-            controls.append({"km": dist, "name": name})
-
-    if st.button("Berechnen", key="calc_button"):
-        controls = sorted(controls, key=lambda x: x["km"])
-
-        results = []
-        last_km = 0.0
-        current_start = start_datetime
-
-        for cp in controls:
-            cp_km = cp["km"]
-
-            gps_time_at_cp = interpolate_time_at_distance(df, cp_km)
-            gps_time_at_last = interpolate_time_at_distance(df, last_km)
-
-            segment_duration = gps_time_at_cp - gps_time_at_last
-            segment_seconds = segment_duration.total_seconds()
-            segment_hours = segment_seconds / 3600.0
-            segment_dist = cp_km - last_km
-            
-            pause_seconds = stand_time_between(df, last_km, cp_km)
-            pause_td = timedelta(seconds=pause_seconds)
-            
-            # Netto-Fahrzeit (ohne Pausen/Standzeiten)
-            netto_seconds = max(segment_seconds - pause_seconds, 0)
-            netto_hours = netto_seconds / 3600.0
-            
-            # Geschwindigkeiten
-            speed_brutto = segment_dist / (segment_hours) if segment_hours > 0 else 0
-            speed_netto = segment_dist / (netto_hours) if netto_hours > 0 else 0
-            
-            # Ankunft = letzte Abfahrt + Netto-Fahrzeit
-            arrival_time = current_start + timedelta(seconds=netto_seconds)
-            
-            # Abfahrt = Ankunft + Pause
-            departure_time = arrival_time + pause_td
-
-
-            (
-                speed_down,
-                speed_light_down,
-                speed_flat,
-                speed_light_up,
-                speed_medium_up,
-                speed_steep_up,
-                speed_very_steep_up
-            ) = speed_by_gradient(df, last_km, cp_km)
-
-            base_offset = gps_time_at_cp - df["time"].iloc[0]
-            #arrival_time = current_start + base_offset
-            #departure_time = arrival_time + pause_td
-
-            def fmt_speed(v):
-                if v is None:
-                    return ""
-                return f"{v:.1f}".replace(".", ",")
-            
-            results.append({
-                "Name": cp["name"],
-                "km": cp_km,
-                "Ankunft": arrival_time,
-                "Pause_min": round(pause_seconds / 60.0, 1),
-                "Segment_h": format_hhmm(segment_hours),
-                "Netto_kmh": f"{speed_netto:.1f}".replace(".", ","),
-                "Brutto_kmh": f"{speed_brutto:.1f}".replace(".", ","),
-                "Speed_down": fmt_speed(speed_down),
-                "Speed_light_down": fmt_speed(speed_light_down),
-                "Speed_flat": fmt_speed(speed_flat),
-                "Speed_light_up": fmt_speed(speed_light_up),
-                "Speed_medium_up": fmt_speed(speed_medium_up),
-                "Speed_steep_up": fmt_speed(speed_steep_up),
-                "Speed_very_steep_up": fmt_speed(speed_very_steep_up),
-                "Abfahrt": departure_time
-            })
-
-
-            last_km = cp_km
-            current_start = departure_time
-
-        res_df = pd.DataFrame(results)
-
-        st.subheader("Ergebnisse")
-        st.dataframe(res_df)
-
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            res_df.to_excel(writer, index=False)
-
-        st.download_button(
-            label="Ergebnisse als Excel herunterladen",
-            data=output.getvalue(),
-            file_name="brevet_ergebnisse.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+
+
+# =====================================================================
+# KONFIGURATION - hier alles anpassen
+# =====================================================================
+
+# ---- Eingabedatei ----
+EXCEL_DATEI = "training_tss.xlsx"   # Pfad zur Excel-Datei
+EXCEL_SHEET = 0                     # Blattname oder Index (0 = erstes Blatt)
+SPALTE_DATUM = "Datum"              # Name der Spalte mit dem Datum
+SPALTE_TSS = "TSS"                  # Name der Spalte mit dem TSS-Wert
+
+# ---- Zeitkonstanten für ATL/CTL (frei wählbar, NICHT fix 7/42) ----
+ATL_TAGE = 7          # Zeitkonstante ATL (z.B. 5-10 Tage üblich)
+CTL_TAGE = 42          # Zeitkonstante CTL (z.B. 28-56 Tage üblich)
+
+# ---- Startwerte am ersten Tag der Zeitreihe ----
+CTL_START = 0.0
+ATL_START = 0.0
+
+# ---- TSB-Bereiche (frei definierbar) ----
+# Liste von Dictionaries: von, bis, Label, Farbe (Hex).
+# "von" ist inklusive, "bis" exklusiv. -inf/inf sind erlaubt (np.inf).
+TSB_BEREICHE = [
+    {"von": -np.inf, "bis": -30, "label": "Hohes Übertrainingsrisiko", "farbe": "#d03b3b"},
+    {"von": -30,      "bis": -10, "label": "Ermüdung / Formaufbau",     "farbe": "#ec835a"},
+    {"von": -10,      "bis": 5,   "label": "Optimale Form",             "farbe": "#0ca30c"},
+    {"von": 5,        "bis": 25,  "label": "Frische / Taper",           "farbe": "#2a78d6"},
+    {"von": 25,       "bis": np.inf, "label": "Formverlust (zu viel Ruhe)", "farbe": "#898781"},
+]
+
+# ---- Ausgabe ----
+OUTPUT_EXCEL = "tss_atl_ctl_tsb_ergebnis.xlsx"
+OUTPUT_PLOT = "tsb_verlauf.png"
+
+
+# =====================================================================
+# 1. Daten einlesen
+# =====================================================================
+
+def daten_einlesen(pfad, sheet, spalte_datum, spalte_tss):
+    """
+    Liest Datum + TSS aus Excel ein und liefert eine tägliche Zeitreihe
+    zurück (lückenlos, fehlende Tage = TSS 0). Mehrere Einträge am selben
+    Tag (z.B. zwei Einheiten) werden aufsummiert.
+    """
+    df = pd.read_excel(pfad, sheet_name=sheet)
+
+    if spalte_datum not in df.columns or spalte_tss not in df.columns:
+        raise ValueError(
+            f"Erwartete Spalten '{spalte_datum}' und '{spalte_tss}' nicht "
+            f"gefunden. Vorhandene Spalten: {list(df.columns)}"
         )
 
-else:
-    st.info("Bitte eine GPX-Datei hochladen.")
+    df = df[[spalte_datum, spalte_tss]].copy()
+    df[spalte_datum] = pd.to_datetime(df[spalte_datum])
+    df[spalte_tss] = pd.to_numeric(df[spalte_tss], errors="coerce").fillna(0)
+
+    # Mehrere Einheiten am selben Tag aufsummieren
+    df = df.groupby(spalte_datum, as_index=True)[spalte_tss].sum()
+    df = df.sort_index()
+
+    # Lückenlose Tagesreihe erzeugen (fehlende Tage = 0 TSS), das ist
+    # wichtig, damit ATL/CTL korrekt abklingen, wenn nicht trainiert wird.
+    alle_tage = pd.date_range(df.index.min(), df.index.max(), freq="D")
+    df = df.reindex(alle_tage, fill_value=0)
+    df.index.name = "Datum"
+    df.name = "TSS"
+
+    return df.to_frame()
+
+
+# =====================================================================
+# 2. ATL, CTL, TSB berechnen
+# =====================================================================
+
+def berechne_atl_ctl_tsb(df, atl_tage=ATL_TAGE, ctl_tage=CTL_TAGE,
+                          ctl_start=CTL_START, atl_start=ATL_START):
+    """
+    Berechnet ATL, CTL und TSB auf Basis der täglichen TSS-Werte.
+
+    TSB des Tages t wird aus den Werten des VORTAGS berechnet (Standard-
+    Konvention, z.B. TrainingPeaks): TSB_t = CTL_(t-1) - ATL_(t-1).
+    Das bildet die Form ab, mit der man in den Tag t hineingeht, also vor
+    der heutigen Einheit.
+    """
+    df = df.copy()
+    n = len(df)
+
+    ctl = np.zeros(n)
+    atl = np.zeros(n)
+    tss = df["TSS"].to_numpy()
+
+    ctl_prev, atl_prev = ctl_start, atl_start
+    for i in range(n):
+        ctl[i] = ctl_prev + (tss[i] - ctl_prev) / ctl_tage
+        atl[i] = atl_prev + (tss[i] - atl_prev) / atl_tage
+        ctl_prev, atl_prev = ctl[i], atl[i]
+
+    df["CTL"] = ctl
+    df["ATL"] = atl
+
+    ctl_gestern = np.concatenate(([ctl_start], ctl[:-1]))
+    atl_gestern = np.concatenate(([atl_start], atl[:-1]))
+    df["TSB"] = ctl_gestern - atl_gestern
+
+    return df
+
+
+# =====================================================================
+# 3. TSB-Bereich je Tag bestimmen (optional, z.B. für Tabellenexport)
+# =====================================================================
+
+def tsb_bereich_zuordnen(tsb_wert, bereiche):
+    for b in bereiche:
+        if b["von"] <= tsb_wert < b["bis"]:
+            return b["label"]
+    return "unbekannt"
+
+
+# =====================================================================
+# 4. Diagramm: TSS/CTL/ATL oben, TSB mit farbigen Zonen unten
+# =====================================================================
+
+def plot_tsb(df, bereiche, output_pfad=OUTPUT_PLOT,
+             atl_tage=ATL_TAGE, ctl_tage=CTL_TAGE):
+    farbe_tss = "#c3c2b7"   # gedeckter Grauton für die TSS-Balken
+    farbe_ctl = "#2a78d6"   # blau
+    farbe_atl = "#eb6834"   # orange
+    farbe_tsb = "#0b0b0b"   # fast schwarz
+
+    fig, (ax_last, ax_tsb) = plt.subplots(
+        2, 1, figsize=(13, 8), sharex=True,
+        gridspec_kw={"height_ratios": [1, 1.3]},
+    )
+    fig.patch.set_facecolor("#fcfcfb")
+
+    # ---- oberes Panel: TSS-Balken + CTL/ATL-Linien ----
+    ax_last.bar(df.index, df["TSS"], color=farbe_tss, width=1.0,
+                label="TSS (täglich)", zorder=1)
+    ax_last.plot(df.index, df["CTL"], color=farbe_ctl, linewidth=2,
+                 label=f"CTL (Fitness, {ctl_tage} Tage)", zorder=3)
+    ax_last.plot(df.index, df["ATL"], color=farbe_atl, linewidth=2,
+                 label=f"ATL (Fatigue, {atl_tage} Tage)", zorder=3)
+    ax_last.set_ylabel("TSS / CTL / ATL")
+    ax_last.set_facecolor("#fcfcfb")
+    ax_last.legend(loc="upper left", frameon=False)
+    ax_last.spines[["top", "right"]].set_visible(False)
+    ax_last.spines[["left", "bottom"]].set_color("#c3c2b7")
+    ax_last.grid(axis="y", color="#e1e0d9", linewidth=0.8)
+    ax_last.set_title("Trainingsbelastung: TSS, CTL, ATL", loc="left",
+                       color="#0b0b0b", fontsize=12, pad=10)
+
+    # ---- unteres Panel: TSB mit farbigen Bereichen ----
+    x_min, x_max = df.index.min(), df.index.max()
+    for b in bereiche:
+        untere = b["von"] if np.isfinite(b["von"]) else df["TSB"].min() - 10
+        obere = b["bis"] if np.isfinite(b["bis"]) else df["TSB"].max() + 10
+        ax_tsb.axhspan(untere, obere, color=b["farbe"], alpha=0.18,
+                        zorder=0, label=b["label"])
+
+    ax_tsb.plot(df.index, df["TSB"], color=farbe_tsb, linewidth=2,
+                label="TSB (Form)", zorder=3)
+    ax_tsb.axhline(0, color="#898781", linewidth=1, linestyle="--", zorder=2)
+
+    ax_tsb.set_ylabel("TSB")
+    ax_tsb.set_facecolor("#fcfcfb")
+    ax_tsb.spines[["top", "right"]].set_visible(False)
+    ax_tsb.spines[["left", "bottom"]].set_color("#c3c2b7")
+    ax_tsb.grid(axis="y", color="#e1e0d9", linewidth=0.8)
+    ax_tsb.set_title("Training Stress Balance (Form) mit definierten Bereichen",
+                      loc="left", color="#0b0b0b", fontsize=12, pad=10)
+
+    # Legende der TSB-Bereiche unterhalb der Linie, ohne die Linien-Legende
+    # zu verdrängen
+    handles, labels = ax_tsb.get_legend_handles_labels()
+    ax_tsb.legend(handles, labels, loc="upper left", frameon=False,
+                  fontsize=9, ncol=1)
+
+    ax_tsb.xaxis.set_major_locator(mdates.AutoDateLocator())
+    ax_tsb.xaxis.set_major_formatter(mdates.DateFormatter("%d.%m.%Y"))
+    fig.autofmt_xdate()
+
+    fig.tight_layout()
+    fig.savefig(output_pfad, dpi=150, facecolor=fig.get_facecolor())
+    plt.close(fig)
+    print(f"Diagramm gespeichert: {output_pfad}")
+
+
+# =====================================================================
+# main
+# =====================================================================
+
+def main():
+    df = daten_einlesen(EXCEL_DATEI, EXCEL_SHEET, SPALTE_DATUM, SPALTE_TSS)
+    df = berechne_atl_ctl_tsb(df, atl_tage=ATL_TAGE, ctl_tage=CTL_TAGE,
+                               ctl_start=CTL_START, atl_start=ATL_START)
+    df["TSB_Bereich"] = df["TSB"].apply(lambda v: tsb_bereich_zuordnen(v, TSB_BEREICHE))
+
+    df.round(2).to_excel(OUTPUT_EXCEL)
+    print(f"Ergebnistabelle gespeichert: {OUTPUT_EXCEL}")
+
+    plot_tsb(df, TSB_BEREICHE, OUTPUT_PLOT, atl_tage=ATL_TAGE, ctl_tage=CTL_TAGE)
+
+
+if __name__ == "__main__":
+    main()
 
 
 
