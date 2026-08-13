@@ -5,12 +5,14 @@ Trainingsanalyse: ATL / CTL / TSB (Streamlit-App)
 Interaktive Streamlit-App zur Trainingssteuerung auf Basis von TSS
 (Training Stress Score):
 
-  - TSS-Werte per Excel-Import UND/ODER manuelle Eingabe erfassen
+  - TSS-Werte (inkl. optionaler Uhrzeit) per Excel-Import UND/ODER manuelle
+    Eingabe erfassen
   - ATL  (Acute Training Load / "Fatigue")   - Zeitkonstante frei wählbar
   - CTL  (Chronic Training Load / "Fitness") - Zeitkonstante frei wählbar
   - TSB  (Training Stress Balance / "Form")  = CTL - ATL
   - TSB-Bereiche (z.B. "Übertrainingsrisiko", "optimale Form") frei
     definierbar und im Diagramm als farbige Zonen dargestellt
+  - Diagramm und Auswertung frei auf einen Datumsbereich eingrenzbar
 
 Benötigte Pakete (requirements.txt):
     streamlit
@@ -42,7 +44,11 @@ st.caption(
 
 if "manuelle_eintraege" not in st.session_state:
     st.session_state.manuelle_eintraege = pd.DataFrame(
-        {"Datum": pd.Series(dtype="datetime64[ns]"), "TSS": pd.Series(dtype="float")}
+        {
+            "Datum": pd.Series(dtype="datetime64[ns]"),
+            "Zeit": pd.Series(dtype="object"),
+            "TSS": pd.Series(dtype="float"),
+        }
     )
 
 if "tsb_bereiche" not in st.session_state:
@@ -218,7 +224,13 @@ with col_import:
     st.subheader("1. Excel-Import")
     hochgeladene_datei = st.file_uploader("Excel-Datei mit TSS-Werten", type=["xlsx", "xls"])
 
-    df_import = pd.DataFrame({"Datum": pd.Series(dtype="datetime64[ns]"), "TSS": pd.Series(dtype="float")})
+    df_import = pd.DataFrame(
+        {
+            "Datum": pd.Series(dtype="datetime64[ns]"),
+            "Zeit": pd.Series(dtype="object"),
+            "TSS": pd.Series(dtype="float"),
+        }
+    )
 
     if hochgeladene_datei is not None:
         try:
@@ -229,14 +241,23 @@ with col_import:
             spalten = list(df_roh.columns)
             datum_default = next((c for c in spalten if "datum" in str(c).lower() or "date" in str(c).lower()), spalten[0])
             tss_default = next((c for c in spalten if "tss" in str(c).lower()), spalten[-1])
+            zeit_default = next((c for c in spalten if "zeit" in str(c).lower() or "uhrzeit" in str(c).lower() or "time" in str(c).lower()), None)
 
-            c1, c2 = st.columns(2)
+            c1, c2, c3 = st.columns(3)
             with c1:
                 spalte_datum = st.selectbox("Spalte mit Datum", spalten, index=spalten.index(datum_default))
             with c2:
                 spalte_tss = st.selectbox("Spalte mit TSS", spalten, index=spalten.index(tss_default))
+            with c3:
+                zeit_optionen = ["(keine)"] + spalten
+                zeit_index = zeit_optionen.index(zeit_default) if zeit_default else 0
+                spalte_zeit = st.selectbox("Spalte mit Uhrzeit (optional)", zeit_optionen, index=zeit_index)
 
             df_import = df_roh[[spalte_datum, spalte_tss]].rename(columns={spalte_datum: "Datum", spalte_tss: "TSS"})
+            if spalte_zeit != "(keine)":
+                df_import["Zeit"] = df_roh[spalte_zeit]
+            else:
+                df_import["Zeit"] = None
             st.success(f"{len(df_import)} Zeilen aus '{hochgeladene_datei.name}' eingelesen.")
         except Exception as e:
             st.error(f"Datei konnte nicht gelesen werden: {e}")
@@ -250,8 +271,10 @@ with col_manuell:
         width="stretch",
         column_config={
             "Datum": st.column_config.DateColumn("Datum", format="DD.MM.YYYY"),
+            "Zeit": st.column_config.TimeColumn("Zeit", format="HH:mm"),
             "TSS": st.column_config.NumberColumn("TSS", min_value=0.0, step=1.0),
         },
+        column_order=["Datum", "Zeit", "TSS"],
         key="manuelle_eintraege_editor",
     )
 
@@ -273,38 +296,76 @@ else:
     if tagesreihe is None or len(tagesreihe) == 0:
         st.warning("Aus den eingegebenen Daten konnte keine gültige Tagesreihe gebildet werden.")
     else:
-        ergebnis = berechne_atl_ctl_tsb(tagesreihe, atl_tage, ctl_tage, ctl_start, atl_start)
+        # ATL/CTL/TSB werden IMMER über die komplette Historie berechnet -
+        # sonst würde ein später gewählter Anzeige-Zeitraum die kumulierten
+        # Werte verfälschen (ATL/CTL bräuchten sonst wieder bei 0 anfangen).
+        ergebnis_gesamt = berechne_atl_ctl_tsb(tagesreihe, atl_tage, ctl_tage, ctl_start, atl_start)
         bereiche_eff = effektive_bereiche(st.session_state.tsb_bereiche)
 
         if len(bereiche_eff) > 0:
-            ergebnis["TSB_Bereich"] = ergebnis["TSB"].apply(lambda v: tsb_bereich_zuordnen(v, bereiche_eff))
+            ergebnis_gesamt["TSB_Bereich"] = ergebnis_gesamt["TSB"].apply(lambda v: tsb_bereich_zuordnen(v, bereiche_eff))
         else:
-            ergebnis["TSB_Bereich"] = "unbekannt"
+            ergebnis_gesamt["TSB_Bereich"] = "unbekannt"
 
-        st.subheader("Diagramm")
-        fig = plot_tsb(ergebnis, bereiche_eff, atl_tage, ctl_tage)
-        st.pyplot(fig, width="stretch")
+        # ---- Zeitraum-Auswahl (gilt für Diagramm + Auswertung) ----
+        gesamt_min = ergebnis_gesamt.index.min().date()
+        gesamt_max = ergebnis_gesamt.index.max().date()
 
-        letzter_tag = ergebnis.iloc[-1]
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("CTL (Fitness)", f"{letzter_tag['CTL']:.1f}")
-        m2.metric("ATL (Fatigue)", f"{letzter_tag['ATL']:.1f}")
-        m3.metric("TSB (Form)", f"{letzter_tag['TSB']:.1f}")
-        m4.metric("Bereich", letzter_tag["TSB_Bereich"])
+        st.subheader("Zeitraum")
+        zeitraum = st.date_input(
+            "Anzeigezeitraum (Diagramm & Auswertung)",
+            value=(gesamt_min, gesamt_max),
+            min_value=gesamt_min,
+            max_value=gesamt_max,
+            format="DD.MM.YYYY",
+        )
+        if isinstance(zeitraum, tuple) and len(zeitraum) == 2:
+            start_datum, end_datum = zeitraum
+        else:
+            # Solange der Nutzer erst ein Datum ausgewählt hat, den vollen
+            # Bereich als Fallback anzeigen.
+            start_datum, end_datum = gesamt_min, gesamt_max
 
-        st.subheader("Ergebnistabelle")
-        st.dataframe(ergebnis.round(2), width="stretch")
+        ergebnis = ergebnis_gesamt.loc[
+            (ergebnis_gesamt.index.date >= start_datum) & (ergebnis_gesamt.index.date <= end_datum)
+        ]
 
-        excel_puffer = pd.ExcelWriter("ergebnis_export.xlsx", engine="openpyxl")
-        ergebnis.round(2).to_excel(excel_puffer)
-        excel_puffer.close()
-        with open("ergebnis_export.xlsx", "rb") as f:
-            st.download_button(
-                "Ergebnistabelle als Excel herunterladen",
-                data=f,
-                file_name="tss_atl_ctl_tsb_ergebnis.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
+        if len(ergebnis) == 0:
+            st.warning("Für den gewählten Zeitraum liegen keine Daten vor.")
+        else:
+            st.subheader("Diagramm")
+            fig = plot_tsb(ergebnis, bereiche_eff, atl_tage, ctl_tage)
+            st.pyplot(fig, width="stretch")
+
+            letzter_tag = ergebnis.iloc[-1]
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("CTL (Fitness)", f"{letzter_tag['CTL']:.1f}")
+            m2.metric("ATL (Fatigue)", f"{letzter_tag['ATL']:.1f}")
+            m3.metric("TSB (Form)", f"{letzter_tag['TSB']:.1f}")
+            m4.metric("Bereich", letzter_tag["TSB_Bereich"])
+
+            st.subheader("Erfasste Trainingseinheiten")
+            rohdaten = df_kombiniert[
+                (pd.to_datetime(df_kombiniert["Datum"]).dt.date >= start_datum)
+                & (pd.to_datetime(df_kombiniert["Datum"]).dt.date <= end_datum)
+            ].copy()
+            rohdaten = rohdaten.sort_values(["Datum", "Zeit"])[["Datum", "Zeit", "TSS"]]
+            st.dataframe(rohdaten, width="stretch", hide_index=True)
+
+            st.subheader("Tagesauswertung (ATL / CTL / TSB)")
+            st.dataframe(ergebnis.round(2), width="stretch")
+
+            excel_puffer = pd.ExcelWriter("ergebnis_export.xlsx", engine="openpyxl")
+            rohdaten.to_excel(excel_puffer, sheet_name="Trainingseinheiten", index=False)
+            ergebnis.round(2).to_excel(excel_puffer, sheet_name="Tagesauswertung")
+            excel_puffer.close()
+            with open("ergebnis_export.xlsx", "rb") as f:
+                st.download_button(
+                    "Auswertung als Excel herunterladen",
+                    data=f,
+                    file_name="tss_atl_ctl_tsb_ergebnis.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
 
 
 
