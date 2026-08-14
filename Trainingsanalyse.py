@@ -29,6 +29,7 @@ Start lokal:  streamlit run Trainingsanalyse.py
 
 import datetime as dt
 import io
+import json
 import os
 import time
 
@@ -53,7 +54,22 @@ GESPEICHERTE_IMPORT_DATEI = "gespeicherte_importe.csv"
 # Pfad/Dateiname der Import-Daten im OneDrive des Nutzers (im Wurzel-
 # verzeichnis, damit kein Ordner vorab angelegt werden muss).
 ONEDRIVE_DATEIPFAD = "/me/drive/root:/gespeicherte_importe_trainingsplaner.csv"
+
+# Einstellungen (Zeitkonstanten, Startwerte, TSB-Bereiche) - werden
+# zusammen mit den Trainingsdaten gespeichert, ebenfalls im OneDrive-
+# Wurzelverzeichnis bzw. lokal als Rückfall.
+ONEDRIVE_EINSTELLUNGEN_PFAD = "/me/drive/root:/einstellungen_trainingsplaner.json"
+GESPEICHERTE_EINSTELLUNGEN_DATEI = "gespeicherte_einstellungen.json"
+
 GRAPH_SCOPES = ["Files.ReadWrite"]
+
+STANDARD_TSB_BEREICHE = [
+    {"von": -60.0, "bis": -30.0, "label": "Hohes Übertrainingsrisiko", "farbe": "#d03b3b"},
+    {"von": -30.0, "bis": -10.0, "label": "Ermüdung / Formaufbau", "farbe": "#ec835a"},
+    {"von": -10.0, "bis": 5.0, "label": "Optimale Form", "farbe": "#0ca30c"},
+    {"von": 5.0, "bis": 25.0, "label": "Frische / Taper", "farbe": "#2a78d6"},
+    {"von": 25.0, "bis": 60.0, "label": "Formverlust (zu viel Ruhe)", "farbe": "#898781"},
+]
 
 
 st.set_page_config(page_title="Trainingsanalyse: ATL / CTL / TSB", layout="wide")
@@ -117,10 +133,10 @@ def _onedrive_access_token():
     return ergebnis["access_token"]
 
 
-def _onedrive_datei_lesen():
+def _onedrive_datei_lesen(pfad):
     token = _onedrive_access_token()
     antwort = requests.get(
-        f"https://graph.microsoft.com/v1.0{ONEDRIVE_DATEIPFAD}:/content",
+        f"https://graph.microsoft.com/v1.0{pfad}:/content",
         headers={"Authorization": f"Bearer {token}"},
         timeout=20,
     )
@@ -130,11 +146,11 @@ def _onedrive_datei_lesen():
     return antwort.content
 
 
-def _onedrive_datei_schreiben(inhalt_bytes):
+def _onedrive_datei_schreiben(pfad, inhalt_bytes, content_type="application/octet-stream"):
     token = _onedrive_access_token()
     antwort = requests.put(
-        f"https://graph.microsoft.com/v1.0{ONEDRIVE_DATEIPFAD}:/content",
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "text/csv"},
+        f"https://graph.microsoft.com/v1.0{pfad}:/content",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": content_type},
         data=inhalt_bytes,
         timeout=20,
     )
@@ -146,7 +162,7 @@ def importierte_daten_laden():
     eingerichtet, sonst als Rückfall aus einer lokalen Datei."""
     if onedrive_konfiguriert():
         try:
-            inhalt = _onedrive_datei_lesen()
+            inhalt = _onedrive_datei_lesen(ONEDRIVE_DATEIPFAD)
             if inhalt is None:
                 return leere_eintraege()
             df = pd.read_csv(io.BytesIO(inhalt))
@@ -174,7 +190,7 @@ def importierte_daten_speichern(df):
         try:
             puffer = io.StringIO()
             df.to_csv(puffer, index=False)
-            _onedrive_datei_schreiben(puffer.getvalue().encode("utf-8"))
+            _onedrive_datei_schreiben(ONEDRIVE_DATEIPFAD, puffer.getvalue().encode("utf-8"), "text/csv")
             return True
         except Exception as e:
             st.error(
@@ -182,6 +198,59 @@ def importierte_daten_speichern(df):
                 "stattdessen nur lokal gespeichert (übersteht kein Neu-Deployment)."
             )
     df.to_csv(GESPEICHERTE_IMPORT_DATEI, index=False)
+    return False
+
+
+def einstellungen_laden():
+    """Lädt gespeicherte Einstellungen (Zeitkonstanten, Startwerte,
+    TSB-Bereiche) - aus OneDrive, falls eingerichtet, sonst als Rückfall
+    aus einer lokalen Datei. Fehlt beides, gelten die Standardwerte."""
+    standard = {
+        "atl_tage": 7,
+        "ctl_tage": 42,
+        "ctl_start": 0.0,
+        "atl_start": 0.0,
+        "tsb_bereiche": STANDARD_TSB_BEREICHE,
+    }
+    geladen = None
+
+    if onedrive_konfiguriert():
+        try:
+            inhalt = _onedrive_datei_lesen(ONEDRIVE_EINSTELLUNGEN_PFAD)
+            if inhalt is not None:
+                geladen = json.loads(inhalt.decode("utf-8"))
+        except Exception as e:
+            st.warning(f"Gespeicherte Einstellungen konnten nicht aus OneDrive geladen werden ({e}).")
+
+    if geladen is None and os.path.exists(GESPEICHERTE_EINSTELLUNGEN_DATEI):
+        try:
+            with open(GESPEICHERTE_EINSTELLUNGEN_DATEI, "r", encoding="utf-8") as f:
+                geladen = json.load(f)
+        except Exception:
+            geladen = None
+
+    if geladen:
+        standard.update(geladen)
+    return standard
+
+
+def einstellungen_speichern(einstellungen):
+    """Schreibt die aktuellen Einstellungen dauerhaft weg - nach OneDrive,
+    falls eingerichtet, sonst als Rückfall in eine lokale Datei."""
+    inhalt_bytes = json.dumps(einstellungen, ensure_ascii=False, indent=2).encode("utf-8")
+
+    if onedrive_konfiguriert():
+        try:
+            _onedrive_datei_schreiben(ONEDRIVE_EINSTELLUNGEN_PFAD, inhalt_bytes, "application/json")
+            return True
+        except Exception as e:
+            st.error(
+                f"Speichern der Einstellungen in OneDrive fehlgeschlagen ({e}). "
+                "Sie wurden stattdessen nur lokal gespeichert (übersteht kein Neu-Deployment)."
+            )
+
+    with open(GESPEICHERTE_EINSTELLUNGEN_DATEI, "w", encoding="utf-8") as f:
+        f.write(inhalt_bytes.decode("utf-8"))
     return False
 
 
@@ -201,19 +270,14 @@ if "manuelle_eintraege" not in st.session_state:
         }
     )
 
+if "einstellungen" not in st.session_state:
+    st.session_state.einstellungen = einstellungen_laden()
+
 if "tsb_bereiche" not in st.session_state:
     # "von" des ersten und "bis" des letzten Bereichs werden automatisch auf
     # -unendlich / +unendlich erweitert (siehe effektive_bereiche()) - hier
     # reichen die inneren Grenzwerte.
-    st.session_state.tsb_bereiche = pd.DataFrame(
-        [
-            {"von": -60.0, "bis": -30.0, "label": "Hohes Übertrainingsrisiko", "farbe": "#d03b3b"},
-            {"von": -30.0, "bis": -10.0, "label": "Ermüdung / Formaufbau", "farbe": "#ec835a"},
-            {"von": -10.0, "bis": 5.0, "label": "Optimale Form", "farbe": "#0ca30c"},
-            {"von": 5.0, "bis": 25.0, "label": "Frische / Taper", "farbe": "#2a78d6"},
-            {"von": 25.0, "bis": 60.0, "label": "Formverlust (zu viel Ruhe)", "farbe": "#898781"},
-        ]
-    )
+    st.session_state.tsb_bereiche = pd.DataFrame(st.session_state.einstellungen["tsb_bereiche"])
 
 
 # =====================================================================
@@ -416,12 +480,18 @@ def plot_tsb(df, bereiche_eff, atl_tage, ctl_tage):
 with st.sidebar:
     st.header("Einstellungen")
 
-    atl_tage = st.number_input("ATL-Zeitkonstante (Tage)", min_value=1, max_value=200, value=7, step=1)
-    ctl_tage = st.number_input("CTL-Zeitkonstante (Tage)", min_value=1, max_value=200, value=42, step=1)
+    _e = st.session_state.einstellungen
+
+    atl_tage = st.number_input(
+        "ATL-Zeitkonstante (Tage)", min_value=1, max_value=200, value=int(_e["atl_tage"]), step=1
+    )
+    ctl_tage = st.number_input(
+        "CTL-Zeitkonstante (Tage)", min_value=1, max_value=200, value=int(_e["ctl_tage"]), step=1
+    )
 
     with st.expander("Erweitert: Startwerte"):
-        ctl_start = st.number_input("CTL-Startwert", value=0.0, step=1.0)
-        atl_start = st.number_input("ATL-Startwert", value=0.0, step=1.0)
+        ctl_start = st.number_input("CTL-Startwert", value=float(_e["ctl_start"]), step=1.0)
+        atl_start = st.number_input("ATL-Startwert", value=float(_e["atl_start"]), step=1.0)
 
     st.divider()
     st.subheader("TSB-Bereiche")
@@ -442,6 +512,27 @@ with st.sidebar:
         },
         key="tsb_bereiche_editor",
     )
+
+    if onedrive_konfiguriert():
+        st.caption("Werden zusammen mit den Trainingsdaten in OneDrive gespeichert.")
+    else:
+        st.caption(
+            "OneDrive ist noch nicht eingerichtet - Einstellungen werden bis "
+            "dahin nur lokal zwischengespeichert (siehe ONEDRIVE_EINRICHTUNG.md)."
+        )
+
+    if st.button("Einstellungen speichern", width="stretch"):
+        neue_einstellungen = {
+            "atl_tage": atl_tage,
+            "ctl_tage": ctl_tage,
+            "ctl_start": ctl_start,
+            "atl_start": atl_start,
+            "tsb_bereiche": st.session_state.tsb_bereiche.to_dict("records"),
+        }
+        st.session_state.einstellungen = neue_einstellungen
+        in_onedrive = einstellungen_speichern(neue_einstellungen)
+        ziel = "OneDrive" if in_onedrive else "der App (lokal, ohne OneDrive-Einrichtung)"
+        st.success(f"Einstellungen in {ziel} gespeichert.")
 
 
 # =====================================================================
@@ -523,7 +614,12 @@ with col_import:
 
     if len(st.session_state.importierte_eintraege) > 0:
         with st.expander(f"Gespeicherte Import-Daten verwalten ({len(st.session_state.importierte_eintraege)} Zeilen)"):
-            st.dataframe(st.session_state.importierte_eintraege, width="stretch", hide_index=True)
+            importierte_anzeige = st.session_state.importierte_eintraege.copy()
+            importierte_anzeige["Datum"] = pd.to_datetime(importierte_anzeige["Datum"]).dt.strftime("%d.%m.%Y")
+            importierte_anzeige["Dauer"] = importierte_anzeige["Dauer"].apply(dauer_anzeige)
+            importierte_anzeige["TSS"] = importierte_anzeige["TSS"].apply(lambda v: f"{v:.1f}")
+            importierte_anzeige = importierte_anzeige.rename(columns={"Dauer": "Trainingszeit (hh:mm)"})
+            st.dataframe(importierte_anzeige, width="stretch", hide_index=True)
             if st.button("Gespeicherte Import-Daten löschen", width="stretch"):
                 st.session_state.importierte_eintraege = leere_eintraege()
                 importierte_daten_speichern(leere_eintraege())  # überschreibt OneDrive/lokale Datei mit leerer Tabelle
@@ -660,23 +756,32 @@ else:
             rohdaten = rohdaten.sort_values(["Datum", "Dauer"])[["Datum", "Dauer", "TSS"]]
             rohdaten_anzeige = rohdaten.copy()
             rohdaten_anzeige["Dauer"] = rohdaten_anzeige["Dauer"].apply(dauer_anzeige)
+            rohdaten_anzeige["TSS"] = rohdaten_anzeige["TSS"].apply(lambda v: f"{v:.1f}")
+            rohdaten_anzeige["Datum"] = pd.to_datetime(rohdaten_anzeige["Datum"]).dt.strftime("%d.%m.%Y")
             rohdaten_anzeige = rohdaten_anzeige.rename(columns={"Dauer": "Trainingszeit (hh:mm)"})
             with st.expander("Erfasste Trainingseinheiten", expanded=False):
                 st.dataframe(rohdaten_anzeige, width="stretch", hide_index=True)
 
             st.subheader("Tagesauswertung (ATL / CTL / TSB)")
 
-            # Trainingszeit als hh:mm-Spalte direkt nach Datum einfügen
-            ergebnis_anzeige = ergebnis.round(2).copy()
+            # Trainingszeit als hh:mm-Spalte direkt nach Datum einfügen;
+            # TSS/CTL/ATL/TSB jeweils mit genau einer Dezimalen als Text
+            # formatiert (garantiert einheitliche Darstellung), Datum als
+            # tt.mm.jjjj.
+            ergebnis_anzeige = ergebnis.copy()
             ergebnis_anzeige.insert(0, "Trainingszeit (hh:mm)", ergebnis_anzeige["Dauer_min"].apply(minuten_zu_hhmm))
             ergebnis_anzeige = ergebnis_anzeige.drop(columns=["Dauer_min"])
+            for _spalte in ["TSS", "CTL", "ATL", "TSB"]:
+                ergebnis_anzeige[_spalte] = ergebnis_anzeige[_spalte].apply(lambda v: f"{v:.1f}")
+            ergebnis_anzeige.index = ergebnis_anzeige.index.strftime("%d.%m.%Y")
+            ergebnis_anzeige.index.name = "Datum"
 
             # Fixierte Summenzeile oberhalb der (scrollbaren) Tabelle - eine
             # echte "frozen row" innerhalb einer einzelnen Tabelle bietet
             # Streamlit nicht an, daher als eigene, nicht scrollende Zeile
             # direkt über der Tabelle dargestellt.
             summe_dauer = minuten_zu_hhmm(ergebnis["Dauer_min"].sum())
-            summe_tss = round(ergebnis["TSS"].sum(), 1)
+            summe_tss = f"{ergebnis['TSS'].sum():.1f}"
             summenzeile = pd.DataFrame(
                 [{
                     "Datum": "Summe",
