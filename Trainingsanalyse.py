@@ -27,6 +27,7 @@ Benötigte Pakete (requirements.txt):
 Start lokal:  streamlit run Trainingsanalyse.py
 """
 
+import calendar
 import datetime as dt
 import io
 import json
@@ -157,6 +158,20 @@ def _onedrive_datei_schreiben(pfad, inhalt_bytes, content_type="application/octe
     antwort.raise_for_status()
 
 
+def _eintraege_normalisieren(df):
+    """Stellt sicher, dass eine geladene Tabelle immer die Spalten
+    Datum/Dauer/TSS enthält (schützt vor Abstürzen bei älteren oder von
+    Hand bearbeiteten gespeicherten Dateien, denen z.B. die Dauer-Spalte
+    fehlt)."""
+    df = df.copy()
+    if "Dauer" not in df.columns:
+        df["Dauer"] = None
+    if "TSS" not in df.columns:
+        df["TSS"] = 0.0
+    df["Datum"] = pd.to_datetime(df["Datum"])
+    return df[["Datum", "Dauer", "TSS"]]
+
+
 def importierte_daten_laden():
     """Lädt zuvor gespeicherte Import-Daten - aus OneDrive, falls
     eingerichtet, sonst als Rückfall aus einer lokalen Datei."""
@@ -165,18 +180,14 @@ def importierte_daten_laden():
             inhalt = _onedrive_datei_lesen(ONEDRIVE_DATEIPFAD)
             if inhalt is None:
                 return leere_eintraege()
-            df = pd.read_csv(io.BytesIO(inhalt))
-            df["Datum"] = pd.to_datetime(df["Datum"])
-            return df
+            return _eintraege_normalisieren(pd.read_csv(io.BytesIO(inhalt)))
         except Exception as e:
             st.warning(f"Gespeicherte Daten konnten nicht aus OneDrive geladen werden ({e}).")
             return leere_eintraege()
 
     if os.path.exists(GESPEICHERTE_IMPORT_DATEI):
         try:
-            df = pd.read_csv(GESPEICHERTE_IMPORT_DATEI)
-            df["Datum"] = pd.to_datetime(df["Datum"])
-            return df
+            return _eintraege_normalisieren(pd.read_csv(GESPEICHERTE_IMPORT_DATEI))
         except Exception:
             pass
     return leere_eintraege()
@@ -341,6 +352,18 @@ def dauer_zu_minuten(wert):
     if isinstance(wert, (int, float)):
         return float(wert) * 60.0  # Dezimalstunden, z.B. 1.5 -> 90 Min
     return 0.0
+
+
+def monate_subtrahieren(datum, anzahl_monate):
+    """Zieht von einem Datum eine Anzahl Kalendermonate ab (Tag wird ggf.
+    auf den letzten gültigen Tag des Zielmonats begrenzt, z.B. 31.03. minus
+    1 Monat -> 28./29.02.)."""
+    monat_index = datum.month - 1 - anzahl_monate
+    jahr = datum.year + monat_index // 12
+    monat = monat_index % 12 + 1
+    letzter_tag_im_monat = calendar.monthrange(jahr, monat)[1]
+    tag = min(datum.day, letzter_tag_im_monat)
+    return dt.date(jahr, monat, tag)
 
 
 def minuten_zu_hhmm(minuten):
@@ -708,21 +731,45 @@ else:
         # ---- Zeitraum-Auswahl (gilt für Diagramm + Auswertung) ----
         gesamt_min = ergebnis_gesamt.index.min().date()
         gesamt_max = ergebnis_gesamt.index.max().date()
+        heute = dt.date.today()
 
         st.subheader("Zeitraum")
-        zeitraum = st.date_input(
-            "Anzeigezeitraum (Diagramm & Auswertung)",
-            value=(gesamt_min, gesamt_max),
-            min_value=gesamt_min,
-            max_value=gesamt_max,
-            format="DD.MM.YYYY",
+        ZEITRAUM_OPTIONEN = [
+            "Aktuelles Jahr",
+            "Letzte 6 Monate",
+            "Letzte 3 Monate",
+            "Letzte 6 Wochen",
+            "Gesamter Zeitraum",
+            "Freie Eingabe",
+        ]
+        zeitraum_wahl = st.selectbox(
+            "Anzeigezeitraum (Diagramm & Auswertung)", ZEITRAUM_OPTIONEN, index=4
         )
-        if isinstance(zeitraum, tuple) and len(zeitraum) == 2:
-            start_datum, end_datum = zeitraum
-        else:
-            # Solange der Nutzer erst ein Datum ausgewählt hat, den vollen
-            # Bereich als Fallback anzeigen.
+
+        if zeitraum_wahl == "Aktuelles Jahr":
+            start_datum, end_datum = dt.date(heute.year, 1, 1), heute
+        elif zeitraum_wahl == "Letzte 6 Monate":
+            start_datum, end_datum = monate_subtrahieren(heute, 6), heute
+        elif zeitraum_wahl == "Letzte 3 Monate":
+            start_datum, end_datum = monate_subtrahieren(heute, 3), heute
+        elif zeitraum_wahl == "Letzte 6 Wochen":
+            start_datum, end_datum = heute - dt.timedelta(weeks=6), heute
+        elif zeitraum_wahl == "Gesamter Zeitraum":
             start_datum, end_datum = gesamt_min, gesamt_max
+        else:  # Freie Eingabe
+            zeitraum = st.date_input(
+                "Von / bis",
+                value=(gesamt_min, gesamt_max),
+                min_value=gesamt_min,
+                max_value=gesamt_max,
+                format="DD.MM.YYYY",
+            )
+            if isinstance(zeitraum, tuple) and len(zeitraum) == 2:
+                start_datum, end_datum = zeitraum
+            else:
+                # Solange der Nutzer erst ein Datum ausgewählt hat, den
+                # vollen Bereich als Fallback anzeigen.
+                start_datum, end_datum = gesamt_min, gesamt_max
 
         ergebnis = ergebnis_gesamt.loc[
             (ergebnis_gesamt.index.date >= start_datum) & (ergebnis_gesamt.index.date <= end_datum)
