@@ -818,7 +818,7 @@ with col_import:
             for _spalte in ["Kg", "SYS", "DIA", "Puls"]:
                 importierte_anzeige[_spalte] = importierte_anzeige[_spalte].apply(zahl_anzeige)
             importierte_anzeige["Training"] = importierte_anzeige["Training"].fillna("")
-            importierte_anzeige = importierte_anzeige.rename(columns={"Dauer": "Trainingszeit (hh:mm)"})
+            importierte_anzeige = importierte_anzeige.rename(columns={"Dauer": "Zeit"})
             st.dataframe(importierte_anzeige, width="stretch", hide_index=True)
             if st.button("Gespeicherte Import-Daten löschen", width="stretch"):
                 st.session_state.importierte_eintraege = leere_eintraege()
@@ -1020,7 +1020,7 @@ else:
                 rohdaten_anzeige[_spalte] = rohdaten_anzeige[_spalte].apply(zahl_anzeige)
             rohdaten_anzeige["Training"] = rohdaten_anzeige["Training"].fillna("")
             rohdaten_anzeige["Datum"] = pd.to_datetime(rohdaten_anzeige["Datum"]).dt.strftime("%d.%m.%Y")
-            rohdaten_anzeige = rohdaten_anzeige.rename(columns={"Dauer": "Trainingszeit (hh:mm)"})
+            rohdaten_anzeige = rohdaten_anzeige.rename(columns={"Dauer": "Zeit"})
             with st.expander("Erfasste Trainingseinheiten", expanded=False):
                 st.dataframe(rohdaten_anzeige, width="stretch", hide_index=True)
 
@@ -1091,7 +1091,7 @@ else:
                 rohdaten_export[_spalte] = pd.to_numeric(rohdaten_export[_spalte], errors="coerce")
             rohdaten_export["Training"] = rohdaten_export["Training"].fillna("")
             rohdaten_export["Datum"] = pd.to_datetime(rohdaten_export["Datum"]).dt.strftime("%d.%m.%Y")
-            rohdaten_export = rohdaten_export.rename(columns={"Dauer": "Trainingszeit (hh:mm)"})
+            rohdaten_export = rohdaten_export.rename(columns={"Dauer": "Zeit"})
 
             ergebnis_export = ergebnis.copy()
             ergebnis_export["Zeit"] = ergebnis_export["Dauer_min"] / (24 * 60)
@@ -1099,7 +1099,7 @@ else:
             ergebnis_export.index = ergebnis_export.index.strftime("%d.%m.%Y")
             ergebnis_export.index.name = "Datum"
             ergebnis_export = ergebnis_export[
-                ["Training", "Trainingszeit (hh:mm)", "TSS", "ATL", "CTL", "TSB", "TSB-Bereich",
+                ["Training", "Zeit", "TSS", "ATL", "CTL", "TSB", "TSB-Bereich",
                  "Kg", "SYS", "DIA", "Puls"]
             ]
 
