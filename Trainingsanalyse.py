@@ -94,6 +94,11 @@ def leere_eintraege():
             "Datum": pd.Series(dtype="datetime64[ns]"),
             "Dauer": pd.Series(dtype="object"),
             "TSS": pd.Series(dtype="float"),
+            "Training": pd.Series(dtype="object"),
+            "Kg": pd.Series(dtype="float"),
+            "SYS": pd.Series(dtype="float"),
+            "DIA": pd.Series(dtype="float"),
+            "Puls": pd.Series(dtype="float"),
         }
     )
 
@@ -160,16 +165,21 @@ def _onedrive_datei_schreiben(pfad, inhalt_bytes, content_type="application/octe
 
 def _eintraege_normalisieren(df):
     """Stellt sicher, dass eine geladene Tabelle immer die Spalten
-    Datum/Dauer/TSS enthält (schützt vor Abstürzen bei älteren oder von
-    Hand bearbeiteten gespeicherten Dateien, denen z.B. die Dauer-Spalte
-    fehlt)."""
+    Datum/Dauer/TSS/Training/Kg/SYS/DIA/Puls enthält (schützt vor Abstürzen
+    bei älteren oder von Hand bearbeiteten gespeicherten Dateien, denen z.B.
+    die Dauer-Spalte oder die später hinzugekommenen Spalten fehlen)."""
     df = df.copy()
     if "Dauer" not in df.columns:
         df["Dauer"] = None
     if "TSS" not in df.columns:
         df["TSS"] = 0.0
+    if "Training" not in df.columns:
+        df["Training"] = None
+    for _spalte in ["Kg", "SYS", "DIA", "Puls"]:
+        if _spalte not in df.columns:
+            df[_spalte] = np.nan
     df["Datum"] = pd.to_datetime(df["Datum"])
-    return df[["Datum", "Dauer", "TSS"]]
+    return df[["Datum", "Dauer", "TSS", "Training", "Kg", "SYS", "DIA", "Puls"]]
 
 
 def importierte_daten_laden():
@@ -278,6 +288,11 @@ if "manuelle_eintraege" not in st.session_state:
             "Datum": pd.Series(dtype="datetime64[ns]"),
             "Dauer": pd.Series(dtype="object"),  # Trainingsdauer als datetime.time (hh:mm)
             "TSS": pd.Series(dtype="float"),
+            "Training": pd.Series(dtype="object"),
+            "Kg": pd.Series(dtype="float"),
+            "SYS": pd.Series(dtype="float"),
+            "DIA": pd.Series(dtype="float"),
+            "Puls": pd.Series(dtype="float"),
         }
     )
 
@@ -383,6 +398,18 @@ def dauer_anzeige(wert):
     return minuten_zu_hhmm(dauer_zu_minuten(wert))
 
 
+def zahl_anzeige(wert, nachkommastellen=1):
+    """Formatiert einen optionalen Zahlenwert (z.B. Kg/SYS/DIA/Puls) mit
+    fester Anzahl Nachkommastellen, leer statt '0.0' falls kein Wert
+    vorhanden ist."""
+    try:
+        if wert is None or pd.isna(wert):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    return f"{float(wert):.{nachkommastellen}f}"
+
+
 def hex_zu_rgba(hex_farbe, alpha=0.28):
     """Wandelt eine Hex-Farbe (#rrggbb) in einen rgba(...)-CSS-String um."""
     h = str(hex_farbe).lstrip("#")
@@ -401,7 +428,7 @@ def zeilen_nach_tsb_bereich_faerben(tabelle, bereiche_eff):
     farb_map = dict(zip(bereiche_eff["label"], bereiche_eff["farbe"])) if len(bereiche_eff) > 0 else {}
 
     def zeile_stylen(zeile):
-        farbe = farb_map.get(zeile.get("TSB_Bereich"))
+        farbe = farb_map.get(zeile.get("TSB_Bereich", zeile.get("TSB-Bereich")))
         if farbe:
             return [f"background-color: {hex_zu_rgba(farbe)}"] * len(zeile)
         return [""] * len(zeile)
@@ -409,20 +436,49 @@ def zeilen_nach_tsb_bereich_faerben(tabelle, bereiche_eff):
     return tabelle.style.apply(zeile_stylen, axis=1)
 
 
+def _training_zusammenfassen(werte):
+    """Fasst mehrere Trainingsbezeichnungen desselben Tages zusammen (z.B.
+    zwei Einheiten am selben Tag) - eindeutige, nicht-leere Werte, mit
+    ' + ' verbunden."""
+    eindeutig = [str(w).strip() for w in werte if pd.notna(w) and str(w).strip() != ""]
+    eindeutig = list(dict.fromkeys(eindeutig))  # Reihenfolge erhalten, Duplikate entfernen
+    return " + ".join(eindeutig)
+
+
 def tagesreihe_aufbauen(df_tss):
-    """Nimmt ein DataFrame mit Spalten Datum/Dauer/TSS, summiert Mehrfach-
-    einträge pro Tag und füllt fehlende Tage mit TSS=0/Dauer=0 (lückenlose
-    Tagesreihe - wichtig, damit ATL/CTL bei Trainingspausen korrekt
-    abklingen)."""
+    """Nimmt ein DataFrame mit Spalten Datum/Dauer/TSS/Training/Kg/SYS/DIA/
+    Puls, summiert bzw. mittelt Mehrfacheinträge pro Tag und füllt fehlende
+    Tage mit TSS=0/Dauer=0 (lückenlose Tagesreihe - wichtig, damit ATL/CTL
+    bei Trainingspausen korrekt abklingen). Kg/SYS/DIA/Puls werden bei
+    fehlenden Tagen NICHT mit 0 aufgefüllt (bleiben leer/NaN), da es sich
+    um Messwerte und keine kumulierbaren Belastungsgrößen handelt."""
     df = df_tss.dropna(subset=["Datum"]).copy()
     df["Datum"] = pd.to_datetime(df["Datum"])
     df["TSS"] = pd.to_numeric(df["TSS"], errors="coerce").fillna(0)
     df["Dauer_min"] = df["Dauer"].apply(dauer_zu_minuten) if "Dauer" in df.columns else 0.0
+    if "Training" not in df.columns:
+        df["Training"] = None
+    for _spalte in ["Kg", "SYS", "DIA", "Puls"]:
+        if _spalte not in df.columns:
+            df[_spalte] = np.nan
+        else:
+            df[_spalte] = pd.to_numeric(df[_spalte], errors="coerce")
     if len(df) == 0:
         return None
-    tag_gruppe = df.groupby("Datum").agg(TSS=("TSS", "sum"), Dauer_min=("Dauer_min", "sum")).sort_index()
+    tag_gruppe = df.groupby("Datum").agg(
+        TSS=("TSS", "sum"),
+        Dauer_min=("Dauer_min", "sum"),
+        Training=("Training", _training_zusammenfassen),
+        Kg=("Kg", "mean"),
+        SYS=("SYS", "mean"),
+        DIA=("DIA", "mean"),
+        Puls=("Puls", "mean"),
+    ).sort_index()
     alle_tage = pd.date_range(tag_gruppe.index.min(), tag_gruppe.index.max(), freq="D")
-    tag_gruppe = tag_gruppe.reindex(alle_tage, fill_value=0)
+    tag_gruppe = tag_gruppe.reindex(alle_tage)
+    tag_gruppe["TSS"] = tag_gruppe["TSS"].fillna(0)
+    tag_gruppe["Dauer_min"] = tag_gruppe["Dauer_min"].fillna(0)
+    tag_gruppe["Training"] = tag_gruppe["Training"].fillna("")
     tag_gruppe.index.name = "Datum"
     return tag_gruppe
 
@@ -596,6 +652,11 @@ with col_import:
             datum_default = next((c for c in spalten if "datum" in str(c).lower() or "date" in str(c).lower()), spalten[0])
             tss_default = next((c for c in spalten if "tss" in str(c).lower()), spalten[-1])
             dauer_default = next((c for c in spalten if "dauer" in str(c).lower() or "duration" in str(c).lower() or "zeit" in str(c).lower()), None)
+            training_default = next((c for c in spalten if "training" in str(c).lower() or "sport" in str(c).lower() or "übung" in str(c).lower()), None)
+            kg_default = next((c for c in spalten if str(c).strip().lower() in ("kg", "gewicht", "weight")), None)
+            sys_default = next((c for c in spalten if "sys" in str(c).lower()), None)
+            dia_default = next((c for c in spalten if "dia" in str(c).lower()), None)
+            puls_default = next((c for c in spalten if "puls" in str(c).lower() or "pulse" in str(c).lower() or "hr" in str(c).lower()), None)
 
             c1, c2, c3 = st.columns(3)
             with c1:
@@ -607,11 +668,35 @@ with col_import:
                 dauer_index = dauer_optionen.index(dauer_default) if dauer_default else 0
                 spalte_dauer = st.selectbox("Spalte mit Trainingszeit (optional, hh:mm)", dauer_optionen, index=dauer_index)
 
+            with st.expander("Weitere optionale Spalten zuordnen (Training, Kg, SYS, DIA, Puls)"):
+                d1, d2, d3, d4, d5 = st.columns(5)
+                optionen = ["(keine)"] + spalten
+                with d1:
+                    spalte_training = st.selectbox(
+                        "Training", optionen, index=optionen.index(training_default) if training_default else 0
+                    )
+                with d2:
+                    spalte_kg = st.selectbox("Kg", optionen, index=optionen.index(kg_default) if kg_default else 0)
+                with d3:
+                    spalte_sys = st.selectbox("SYS", optionen, index=optionen.index(sys_default) if sys_default else 0)
+                with d4:
+                    spalte_dia = st.selectbox("DIA", optionen, index=optionen.index(dia_default) if dia_default else 0)
+                with d5:
+                    spalte_puls = st.selectbox("Puls", optionen, index=optionen.index(puls_default) if puls_default else 0)
+
             df_import = df_roh[[spalte_datum, spalte_tss]].rename(columns={spalte_datum: "Datum", spalte_tss: "TSS"})
             if spalte_dauer != "(keine)":
                 df_import["Dauer"] = df_roh[spalte_dauer]
             else:
                 df_import["Dauer"] = None
+            for _ziel, _quelle in [
+                ("Training", spalte_training),
+                ("Kg", spalte_kg),
+                ("SYS", spalte_sys),
+                ("DIA", spalte_dia),
+                ("Puls", spalte_puls),
+            ]:
+                df_import[_ziel] = df_roh[_quelle] if _quelle != "(keine)" else None
             st.success(f"{len(df_import)} Zeilen aus '{hochgeladene_datei.name}' eingelesen.")
 
             if st.button("Importierte Daten dauerhaft in der App speichern", width="stretch"):
@@ -641,6 +726,9 @@ with col_import:
             importierte_anzeige["Datum"] = pd.to_datetime(importierte_anzeige["Datum"]).dt.strftime("%d.%m.%Y")
             importierte_anzeige["Dauer"] = importierte_anzeige["Dauer"].apply(dauer_anzeige)
             importierte_anzeige["TSS"] = importierte_anzeige["TSS"].apply(lambda v: f"{v:.1f}")
+            for _spalte in ["Kg", "SYS", "DIA", "Puls"]:
+                importierte_anzeige[_spalte] = importierte_anzeige[_spalte].apply(zahl_anzeige)
+            importierte_anzeige["Training"] = importierte_anzeige["Training"].fillna("")
             importierte_anzeige = importierte_anzeige.rename(columns={"Dauer": "Trainingszeit (hh:mm)"})
             st.dataframe(importierte_anzeige, width="stretch", hide_index=True)
             if st.button("Gespeicherte Import-Daten löschen", width="stretch"):
@@ -663,12 +751,35 @@ with col_manuell:
             neue_dauer = st.time_input("Trainingszeit (hh:mm)", value=dt.time(1, 0), step=60)
         with fc3:
             neuer_tss = st.number_input("TSS", min_value=0.0, step=1.0, value=0.0)
+
+        st.caption("Optional: Training, Körpergewicht und Blutdruck/Puls:")
+        fc4, fc5, fc6, fc7, fc8 = st.columns(5)
+        with fc4:
+            neues_training = st.text_input("Training", value="")
+        with fc5:
+            neues_kg = st.number_input("Kg", min_value=0.0, step=0.1, value=0.0, format="%.1f")
+        with fc6:
+            neuer_sys = st.number_input("SYS", min_value=0.0, step=1.0, value=0.0)
+        with fc7:
+            neuer_dia = st.number_input("DIA", min_value=0.0, step=1.0, value=0.0)
+        with fc8:
+            neuer_puls = st.number_input("Puls", min_value=0.0, step=1.0, value=0.0)
+
         abgeschickt = st.form_submit_button("Einheit hinzufügen", width="stretch")
 
     if abgeschickt:
         neue_dauer_hhmm = f"{neue_dauer.hour:02d}:{neue_dauer.minute:02d}"
         neue_zeile = pd.DataFrame(
-            [{"Datum": pd.Timestamp(neues_datum), "Dauer": neue_dauer_hhmm, "TSS": neuer_tss}]
+            [{
+                "Datum": pd.Timestamp(neues_datum),
+                "Dauer": neue_dauer_hhmm,
+                "TSS": neuer_tss,
+                "Training": neues_training.strip() if neues_training else None,
+                "Kg": neues_kg if neues_kg > 0 else np.nan,
+                "SYS": neuer_sys if neuer_sys > 0 else np.nan,
+                "DIA": neuer_dia if neuer_dia > 0 else np.nan,
+                "Puls": neuer_puls if neuer_puls > 0 else np.nan,
+            }]
         )
         st.session_state.manuelle_eintraege = pd.concat(
             [st.session_state.manuelle_eintraege, neue_zeile], ignore_index=True
@@ -689,8 +800,13 @@ with col_manuell:
                 "Trainingsdauer (hh:mm)", help="Format hh:mm, z.B. 1:30 für 1 Stunde 30 Minuten"
             ),
             "TSS": st.column_config.NumberColumn("TSS", min_value=0.0, step=1.0),
+            "Training": st.column_config.TextColumn("Training"),
+            "Kg": st.column_config.NumberColumn("Kg", step=0.1, format="%.1f"),
+            "SYS": st.column_config.NumberColumn("SYS", step=1.0),
+            "DIA": st.column_config.NumberColumn("DIA", step=1.0),
+            "Puls": st.column_config.NumberColumn("Puls", step=1.0),
         },
-        column_order=["Datum", "Dauer", "TSS"],
+        column_order=["Datum", "Dauer", "TSS", "Training", "Kg", "SYS", "DIA", "Puls"],
         key="manuelle_eintraege_editor",
     )
 
@@ -800,10 +916,15 @@ else:
                 (pd.to_datetime(df_kombiniert["Datum"]).dt.date >= start_datum)
                 & (pd.to_datetime(df_kombiniert["Datum"]).dt.date <= end_datum)
             ].copy()
-            rohdaten = rohdaten.sort_values(["Datum", "Dauer"])[["Datum", "Dauer", "TSS"]]
+            rohdaten = rohdaten.sort_values(["Datum", "Dauer"])[
+                ["Datum", "Training", "Dauer", "TSS", "Kg", "SYS", "DIA", "Puls"]
+            ]
             rohdaten_anzeige = rohdaten.copy()
             rohdaten_anzeige["Dauer"] = rohdaten_anzeige["Dauer"].apply(dauer_anzeige)
             rohdaten_anzeige["TSS"] = rohdaten_anzeige["TSS"].apply(lambda v: f"{v:.1f}")
+            for _spalte in ["Kg", "SYS", "DIA", "Puls"]:
+                rohdaten_anzeige[_spalte] = rohdaten_anzeige[_spalte].apply(zahl_anzeige)
+            rohdaten_anzeige["Training"] = rohdaten_anzeige["Training"].fillna("")
             rohdaten_anzeige["Datum"] = pd.to_datetime(rohdaten_anzeige["Datum"]).dt.strftime("%d.%m.%Y")
             rohdaten_anzeige = rohdaten_anzeige.rename(columns={"Dauer": "Trainingszeit (hh:mm)"})
             with st.expander("Erfasste Trainingseinheiten", expanded=False):
@@ -811,33 +932,47 @@ else:
 
             st.subheader("Tagesauswertung (ATL / CTL / TSB)")
 
-            # Trainingszeit als hh:mm-Spalte direkt nach Datum einfügen;
-            # TSS/CTL/ATL/TSB jeweils mit genau einer Dezimalen als Text
-            # formatiert (garantiert einheitliche Darstellung), Datum als
-            # tt.mm.jjjj.
+            # Spalten in der vom Nutzer festgelegten Reihenfolge aufbauen:
+            # Datum, Training, Trainingszeit, TSS, ATL, CTL, TSB,
+            # TSB-Bereich, Kg, SYS, DIA, Puls. TSS/ATL/CTL/TSB jeweils mit
+            # genau einer Dezimalen als Text formatiert (garantiert
+            # einheitliche Darstellung), Datum als tt.mm.jjjj.
             ergebnis_anzeige = ergebnis.copy()
-            ergebnis_anzeige.insert(0, "Trainingszeit (hh:mm)", ergebnis_anzeige["Dauer_min"].apply(minuten_zu_hhmm))
-            ergebnis_anzeige = ergebnis_anzeige.drop(columns=["Dauer_min"])
-            for _spalte in ["TSS", "CTL", "ATL", "TSB"]:
+            ergebnis_anzeige["Trainingszeit (hh:mm)"] = ergebnis_anzeige["Dauer_min"].apply(minuten_zu_hhmm)
+            ergebnis_anzeige["Training"] = ergebnis_anzeige["Training"].fillna("")
+            for _spalte in ["TSS", "ATL", "CTL", "TSB"]:
                 ergebnis_anzeige[_spalte] = ergebnis_anzeige[_spalte].apply(lambda v: f"{v:.1f}")
+            for _spalte in ["Kg", "SYS", "DIA", "Puls"]:
+                ergebnis_anzeige[_spalte] = ergebnis_anzeige[_spalte].apply(zahl_anzeige)
+            ergebnis_anzeige = ergebnis_anzeige.rename(columns={"TSB_Bereich": "TSB-Bereich"})
             ergebnis_anzeige.index = ergebnis_anzeige.index.strftime("%d.%m.%Y")
             ergebnis_anzeige.index.name = "Datum"
+            ergebnis_anzeige = ergebnis_anzeige[
+                ["Training", "Trainingszeit (hh:mm)", "TSS", "ATL", "CTL", "TSB", "TSB-Bereich",
+                 "Kg", "SYS", "DIA", "Puls"]
+            ]
 
             # Fixierte Summenzeile oberhalb der (scrollbaren) Tabelle - eine
             # echte "frozen row" innerhalb einer einzelnen Tabelle bietet
             # Streamlit nicht an, daher als eigene, nicht scrollende Zeile
-            # direkt über der Tabelle dargestellt.
+            # direkt über der Tabelle dargestellt. Kg/SYS/DIA/Puls werden
+            # hier als Mittelwerte (nicht Summen) ausgewiesen.
             summe_dauer = minuten_zu_hhmm(ergebnis["Dauer_min"].sum())
             summe_tss = f"{ergebnis['TSS'].sum():.1f}"
             summenzeile = pd.DataFrame(
                 [{
                     "Datum": "Summe",
+                    "Training": "–",
                     "Trainingszeit (hh:mm)": summe_dauer,
                     "TSS": summe_tss,
-                    "CTL": "–",
                     "ATL": "–",
+                    "CTL": "–",
                     "TSB": "–",
-                    "TSB_Bereich": "–",
+                    "TSB-Bereich": "–",
+                    "Kg": zahl_anzeige(ergebnis["Kg"].mean()),
+                    "SYS": zahl_anzeige(ergebnis["SYS"].mean()),
+                    "DIA": zahl_anzeige(ergebnis["DIA"].mean()),
+                    "Puls": zahl_anzeige(ergebnis["Puls"].mean()),
                 }]
             )
             st.dataframe(summenzeile, width="stretch", hide_index=True)
