@@ -564,7 +564,7 @@ def plot_tsb(df, bereiche_eff, atl_tage, ctl_tage):
 
 
 def plot_kg_sys(df, sys_bereiche):
-    """Balkengrafik Kg (oben) + Liniengrafik SYS mit farbig hinterlegten
+    """Balkengrafik Kg (oben) + Balkengrafik SYS mit farbig hinterlegten
     Bewertungsbereichen (unten). Tage ohne Messwert bleiben in beiden
     Grafiken einfach leer (keine 0-Werte)."""
     farbe_kg = "#2a78d6"
@@ -595,8 +595,7 @@ def plot_kg_sys(df, sys_bereiche):
         obere = b["bis"] if np.isfinite(b["bis"]) else sys_max + 10
         ax_sys.axhspan(untere, obere, color=b["farbe"], alpha=0.22, zorder=0, label=b["label"])
 
-    ax_sys.plot(df.index, df["SYS"], color=farbe_sys, linewidth=2, marker="o", markersize=3,
-                label="SYS", zorder=3)
+    ax_sys.bar(df.index, df["SYS"], color=farbe_sys, width=1.0, label="SYS", zorder=3)
     ax_sys.set_ylabel("SYS")
     ax_sys.set_facecolor("#fcfcfb")
     ax_sys.spines[["top", "right"]].set_visible(False)
