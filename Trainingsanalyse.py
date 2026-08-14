@@ -568,7 +568,7 @@ def plot_kg_sys(df, sys_bereiche):
     Bewertungsbereichen (unten). Tage ohne Messwert bleiben in beiden
     Grafiken einfach leer (keine 0-Werte)."""
     farbe_kg = "#2a78d6"
-    farbe_sys = "#0b0b0b"
+    farbe_sys = "#8a8a8a"
 
     fig, (ax_kg, ax_sys) = plt.subplots(
         2, 1, figsize=(13, 7), sharex=True, gridspec_kw={"height_ratios": [1, 1.3]}
