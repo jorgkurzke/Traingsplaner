@@ -1,12 +1,6 @@
 streamlit
-gpxpy
 pandas
-openpyxl
-folium
-numpy
 matplotlib
-reportlab
-xlsxwriter
-streamlit-folium
-fpdf
-plotly
+openpyxl
+msal
+requests

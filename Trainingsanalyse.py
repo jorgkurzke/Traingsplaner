@@ -7,8 +7,8 @@ Interaktive Streamlit-App zur Trainingssteuerung auf Basis von TSS
 
   - TSS-Werte (inkl. optionaler Trainingsdauer) per Excel-Import UND/ODER
     manuelle Eingabe erfassen; importierte Daten werden auf Wunsch
-    dauerhaft in der App gespeichert (siehe GESPEICHERTE_IMPORT_DATEI),
-    ein erneutes Hochladen ist danach nicht mehr nötig
+    dauerhaft in OneDrive gespeichert, ein erneutes Hochladen ist danach
+    nicht mehr nötig (Einrichtung siehe ONEDRIVE_EINRICHTUNG.md)
   - ATL  (Acute Training Load / "Fatigue")   - Zeitkonstante frei wählbar
   - CTL  (Chronic Training Load / "Fitness") - Zeitkonstante frei wählbar
   - TSB  (Training Stress Balance / "Form")  = CTL - ATL
@@ -21,22 +21,39 @@ Benötigte Pakete (requirements.txt):
     pandas
     matplotlib
     openpyxl
+    msal
+    requests
 
 Start lokal:  streamlit run Trainingsanalyse.py
 """
 
 import datetime as dt
+import io
 import os
+import time
 
 import numpy as np
 import pandas as pd
+import requests
 import streamlit as st
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 
-# Datei, in der importierte Excel-Daten dauerhaft (über Session/Neuladen
-# hinweg) gespeichert werden. Liegt im Arbeitsverzeichnis der App.
+try:
+    import msal
+except ImportError:
+    msal = None
+
+# Datei, in der importierte Excel-Daten als Rückfall-Option gespeichert
+# werden, FALLS OneDrive (noch) nicht eingerichtet ist (siehe unten). Liegt
+# im Arbeitsverzeichnis der App und übersteht nur Reruns/Schlafmodus, aber
+# kein Neu-Deployment.
 GESPEICHERTE_IMPORT_DATEI = "gespeicherte_importe.csv"
+
+# Pfad/Dateiname der Import-Daten im OneDrive des Nutzers (im Wurzel-
+# verzeichnis, damit kein Ordner vorab angelegt werden muss).
+ONEDRIVE_DATEIPFAD = "/me/drive/root:/gespeicherte_importe_trainingsplaner.csv"
+GRAPH_SCOPES = ["Files.ReadWrite"]
 
 
 st.set_page_config(page_title="Trainingsanalyse: ATL / CTL / TSB", layout="wide")
@@ -48,9 +65,10 @@ st.caption(
 
 
 # =====================================================================
-# Persistenz für importierte Daten (überlebt Reruns UND - solange die
-# Datei auf der Festplatte der App erhalten bleibt - auch ein Neuladen
-# der Seite oder ein Aufwachen aus dem Schlafmodus)
+# Persistenz für importierte Daten: OneDrive (Microsoft Graph API), mit
+# automatischem Rückfall auf eine lokale Datei, falls OneDrive (noch)
+# nicht in den Streamlit-Secrets eingerichtet ist. Einrichtung siehe
+# ONEDRIVE_EINRICHTUNG.md.
 # =====================================================================
 
 def leere_eintraege():
@@ -63,9 +81,81 @@ def leere_eintraege():
     )
 
 
+def onedrive_konfiguriert():
+    """Prüft, ob client_id + refresh_token in den Streamlit-Secrets unter
+    [onedrive] hinterlegt sind."""
+    if msal is None:
+        return False
+    try:
+        return "onedrive" in st.secrets and {"client_id", "refresh_token"} <= set(st.secrets["onedrive"].keys())
+    except Exception:
+        return False
+
+
+def _onedrive_access_token():
+    """Holt ein aktuelles Graph-Access-Token über den in den Secrets
+    hinterlegten Refresh Token. Wird pro Sitzung zwischengespeichert, damit
+    nicht bei jedem Rerun ein neuer Netzwerk-Aufruf nötig ist."""
+    jetzt = time.time()
+    cache = st.session_state.get("_onedrive_token_cache")
+    if cache and cache["ablauf"] > jetzt + 60:
+        return cache["access_token"]
+
+    client_id = st.secrets["onedrive"]["client_id"]
+    refresh_token = st.secrets["onedrive"]["refresh_token"]
+    authority = st.secrets["onedrive"].get("authority", "https://login.microsoftonline.com/consumers")
+
+    app = msal.PublicClientApplication(client_id, authority=authority)
+    ergebnis = app.acquire_token_by_refresh_token(refresh_token, scopes=GRAPH_SCOPES)
+    if "access_token" not in ergebnis:
+        raise RuntimeError(ergebnis.get("error_description", str(ergebnis)))
+
+    st.session_state["_onedrive_token_cache"] = {
+        "access_token": ergebnis["access_token"],
+        "ablauf": jetzt + ergebnis.get("expires_in", 3600),
+    }
+    return ergebnis["access_token"]
+
+
+def _onedrive_datei_lesen():
+    token = _onedrive_access_token()
+    antwort = requests.get(
+        f"https://graph.microsoft.com/v1.0{ONEDRIVE_DATEIPFAD}:/content",
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=20,
+    )
+    if antwort.status_code == 404:
+        return None  # Datei existiert noch nicht - erster Aufruf
+    antwort.raise_for_status()
+    return antwort.content
+
+
+def _onedrive_datei_schreiben(inhalt_bytes):
+    token = _onedrive_access_token()
+    antwort = requests.put(
+        f"https://graph.microsoft.com/v1.0{ONEDRIVE_DATEIPFAD}:/content",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "text/csv"},
+        data=inhalt_bytes,
+        timeout=20,
+    )
+    antwort.raise_for_status()
+
+
 def importierte_daten_laden():
-    """Lädt zuvor gespeicherte Import-Daten von der Festplatte, falls
-    vorhanden. Bei fehlender/fehlerhafter Datei: leere Tabelle."""
+    """Lädt zuvor gespeicherte Import-Daten - aus OneDrive, falls
+    eingerichtet, sonst als Rückfall aus einer lokalen Datei."""
+    if onedrive_konfiguriert():
+        try:
+            inhalt = _onedrive_datei_lesen()
+            if inhalt is None:
+                return leere_eintraege()
+            df = pd.read_csv(io.BytesIO(inhalt))
+            df["Datum"] = pd.to_datetime(df["Datum"])
+            return df
+        except Exception as e:
+            st.warning(f"Gespeicherte Daten konnten nicht aus OneDrive geladen werden ({e}).")
+            return leere_eintraege()
+
     if os.path.exists(GESPEICHERTE_IMPORT_DATEI):
         try:
             df = pd.read_csv(GESPEICHERTE_IMPORT_DATEI)
@@ -77,9 +167,22 @@ def importierte_daten_laden():
 
 
 def importierte_daten_speichern(df):
-    """Schreibt die aktuellen Import-Daten dauerhaft auf die Festplatte,
-    damit sie beim nächsten Start/Neuladen der App wieder verfügbar sind."""
+    """Schreibt die aktuellen Import-Daten dauerhaft weg - nach OneDrive,
+    falls eingerichtet, sonst als Rückfall in eine lokale Datei (übersteht
+    dann nur Reruns/Schlafmodus, kein Neu-Deployment)."""
+    if onedrive_konfiguriert():
+        try:
+            puffer = io.StringIO()
+            df.to_csv(puffer, index=False)
+            _onedrive_datei_schreiben(puffer.getvalue().encode("utf-8"))
+            return True
+        except Exception as e:
+            st.error(
+                f"Speichern in OneDrive fehlgeschlagen ({e}). Die Daten wurden "
+                "stattdessen nur lokal gespeichert (übersteht kein Neu-Deployment)."
+            )
     df.to_csv(GESPEICHERTE_IMPORT_DATEI, index=False)
+    return False
 
 
 # =====================================================================
@@ -350,11 +453,19 @@ col_import, col_manuell = st.columns(2)
 with col_import:
     st.subheader("1. Excel-Import")
 
+    if onedrive_konfiguriert():
+        st.caption("OneDrive-Speicherung aktiv.")
+    else:
+        st.caption(
+            "OneDrive ist noch nicht eingerichtet (siehe ONEDRIVE_EINRICHTUNG.md) - "
+            "importierte Daten werden bis dahin nur lokal auf der App-Festplatte "
+            "zwischengespeichert (übersteht kein Neu-Deployment)."
+        )
+
     if len(st.session_state.importierte_eintraege) > 0:
         st.caption(
             f"Aktuell {len(st.session_state.importierte_eintraege)} importierte Zeilen "
-            "dauerhaft in der App gespeichert - dafür muss keine Excel-Datei mehr "
-            "hochgeladen werden."
+            "dauerhaft gespeichert - dafür muss keine Excel-Datei mehr hochgeladen werden."
         )
 
     hochgeladene_datei = st.file_uploader("Excel-Datei mit TSS-Werten", type=["xlsx", "xls"])
@@ -400,11 +511,12 @@ with col_import:
                     .reset_index(drop=True)
                 )
                 st.session_state.importierte_eintraege = kombiniert
-                importierte_daten_speichern(kombiniert)
+                in_onedrive_gespeichert = importierte_daten_speichern(kombiniert)
+                ziel = "OneDrive" if in_onedrive_gespeichert else "der App (lokal, ohne OneDrive-Einrichtung)"
                 st.success(
-                    f"Gespeichert. Insgesamt {len(kombiniert)} importierte Zeilen liegen "
-                    "jetzt dauerhaft in der App - die Excel-Datei muss dafür nicht "
-                    "erneut hochgeladen werden."
+                    f"In {ziel} gespeichert. Insgesamt {len(kombiniert)} importierte Zeilen "
+                    "liegen jetzt dauerhaft vor - die Excel-Datei muss dafür nicht erneut "
+                    "hochgeladen werden."
                 )
         except Exception as e:
             st.error(f"Datei konnte nicht gelesen werden: {e}")
@@ -414,6 +526,7 @@ with col_import:
             st.dataframe(st.session_state.importierte_eintraege, width="stretch", hide_index=True)
             if st.button("Gespeicherte Import-Daten löschen", width="stretch"):
                 st.session_state.importierte_eintraege = leere_eintraege()
+                importierte_daten_speichern(leere_eintraege())  # überschreibt OneDrive/lokale Datei mit leerer Tabelle
                 if os.path.exists(GESPEICHERTE_IMPORT_DATEI):
                     os.remove(GESPEICHERTE_IMPORT_DATEI)
                 st.success("Gespeicherte Import-Daten gelöscht.")
@@ -593,7 +706,3 @@ else:
                     file_name="tss_atl_ctl_tsb_ergebnis.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
-
-
-
-
