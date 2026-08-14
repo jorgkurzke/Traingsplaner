@@ -409,6 +409,22 @@ def dauer_anzeige(wert):
     return minuten_zu_hhmm(dauer_zu_minuten(wert))
 
 
+def _excel_zahlenformate_setzen(worksheet, formate):
+    """Setzt für die per Spaltenname (in der Kopfzeile) angegebenen Spalten
+    ein Excel-Zahlenformat. Die Werte müssen dafür bereits als echte
+    Zahlen (float) geschrieben worden sein - Excel zeigt sie dann als
+    Zahl an und übernimmt automatisch das Dezimaltrennzeichen der
+    Excel-Spracheinstellung (i.d.R. Komma bei deutschem Excel), statt
+    fest einprogrammierter Zeichen."""
+    for zelle in worksheet[1]:
+        format_code = formate.get(zelle.value)
+        if not format_code:
+            continue
+        buchstabe = zelle.column_letter
+        for zeile in range(2, worksheet.max_row + 1):
+            worksheet[f"{buchstabe}{zeile}"].number_format = format_code
+
+
 def zahl_anzeige(wert, nachkommastellen=1):
     """Formatiert einen optionalen Zahlenwert (z.B. Kg/SYS/DIA/Puls) mit
     fester Anzahl Nachkommastellen, leer statt '0.0' falls kein Wert
@@ -1060,16 +1076,45 @@ else:
             )
             st.caption("Die Zeilenfarbe entspricht dem TSB-Bereich des jeweiligen Tages (gleiche Farben wie die Zonen im TSB-Diagramm oben).")
 
-            # Für den Excel-Export der Tagesauswertung Komma statt Punkt als
-            # Dezimalzeichen verwenden (deutsches Zahlenformat); die
-            # Bildschirmanzeige oben bleibt davon unberührt.
-            ergebnis_export = ergebnis_anzeige.copy()
-            for _spalte in ["TSS", "ATL", "CTL", "TSB", "Kg", "SYS", "DIA", "Puls"]:
-                ergebnis_export[_spalte] = ergebnis_export[_spalte].astype(str).str.replace(".", ",", regex=False)
+            # Für den Excel-Export bewusst die ROHEN (numerischen) Daten
+            # verwenden statt der Text-formatierten Anzeige-Tabellen, damit
+            # TSS/ATL/CTL/TSB/Kg/SYS/DIA/Puls als echte Zahlen exportiert
+            # werden (sortier-/rechenbar in Excel) und Trainingszeit als
+            # echter Excel-Zeitwert. Das Dezimaltrennzeichen zeigt Excel
+            # dann automatisch passend zur eigenen Spracheinstellung an
+            # (bei deutschem Excel Komma) - fest einprogrammierte Zeichen
+            # sind dafür nicht nötig bzw. nicht zuverlässig.
+            rohdaten_export = rohdaten.copy()
+            rohdaten_export["Dauer"] = rohdaten_export["Dauer"].apply(dauer_zu_minuten) / (24 * 60)
+            rohdaten_export["TSS"] = pd.to_numeric(rohdaten_export["TSS"], errors="coerce")
+            for _spalte in ["Kg", "SYS", "DIA", "Puls"]:
+                rohdaten_export[_spalte] = pd.to_numeric(rohdaten_export[_spalte], errors="coerce")
+            rohdaten_export["Training"] = rohdaten_export["Training"].fillna("")
+            rohdaten_export["Datum"] = pd.to_datetime(rohdaten_export["Datum"]).dt.strftime("%d.%m.%Y")
+            rohdaten_export = rohdaten_export.rename(columns={"Dauer": "Trainingszeit (hh:mm)"})
+
+            ergebnis_export = ergebnis.copy()
+            ergebnis_export["Trainingszeit (hh:mm)"] = ergebnis_export["Dauer_min"] / (24 * 60)
+            ergebnis_export = ergebnis_export.rename(columns={"TSB_Bereich": "TSB-Bereich"})
+            ergebnis_export.index = ergebnis_export.index.strftime("%d.%m.%Y")
+            ergebnis_export.index.name = "Datum"
+            ergebnis_export = ergebnis_export[
+                ["Training", "Trainingszeit (hh:mm)", "TSS", "ATL", "CTL", "TSB", "TSB-Bereich",
+                 "Kg", "SYS", "DIA", "Puls"]
+            ]
 
             excel_puffer = pd.ExcelWriter("ergebnis_export.xlsx", engine="openpyxl")
-            rohdaten_anzeige.to_excel(excel_puffer, sheet_name="Trainingseinheiten", index=False)
+            rohdaten_export.to_excel(excel_puffer, sheet_name="Trainingseinheiten", index=False)
             ergebnis_export.to_excel(excel_puffer, sheet_name="Tagesauswertung")
+
+            _excel_zeit_zahl_formate = {
+                "Trainingszeit (hh:mm)": "[hh]:mm",
+                "TSS": "0.0", "ATL": "0.0", "CTL": "0.0", "TSB": "0.0",
+                "Kg": "0.0", "SYS": "0.0", "DIA": "0.0", "Puls": "0.0",
+            }
+            _excel_zahlenformate_setzen(excel_puffer.sheets["Trainingseinheiten"], _excel_zeit_zahl_formate)
+            _excel_zahlenformate_setzen(excel_puffer.sheets["Tagesauswertung"], _excel_zeit_zahl_formate)
+
             excel_puffer.close()
             with open("ergebnis_export.xlsx", "rb") as f:
                 st.download_button(
