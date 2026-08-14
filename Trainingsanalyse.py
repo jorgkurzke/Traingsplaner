@@ -72,6 +72,17 @@ STANDARD_TSB_BEREICHE = [
     {"von": 25.0, "bis": 60.0, "label": "Formverlust (zu viel Ruhe)", "farbe": "#898781"},
 ]
 
+# Bewertungsbereiche für den systolischen Blutdruck (SYS), fest vorgegeben
+# (nicht über die Oberfläche konfigurierbar). Grenzen so gewählt, dass sie
+# nahtlos aneinander anschließen (keine Lücke zwischen den Bereichen):
+# <=130 grün, 131-139 gelb, 140-159 orange, >159 (also auch >160) rot.
+SYS_BEREICHE = [
+    {"von": -np.inf, "bis": 130.0, "label": "SYS ≤ 130", "farbe": "#0ca30c"},
+    {"von": 130.0, "bis": 139.0, "label": "SYS 131 - 139", "farbe": "#e8c93a"},
+    {"von": 139.0, "bis": 159.0, "label": "SYS 140 - 159", "farbe": "#eb6834"},
+    {"von": 159.0, "bis": np.inf, "label": "SYS > 159", "farbe": "#d03b3b"},
+]
+
 
 st.set_page_config(page_title="Trainingsanalyse: ATL / CTL / TSB", layout="wide")
 st.title("Trainingsanalyse: ATL / CTL / TSB")
@@ -552,6 +563,59 @@ def plot_tsb(df, bereiche_eff, atl_tage, ctl_tage):
     return fig
 
 
+def plot_kg_sys(df, sys_bereiche):
+    """Balkengrafik Kg (oben) + Liniengrafik SYS mit farbig hinterlegten
+    Bewertungsbereichen (unten). Tage ohne Messwert bleiben in beiden
+    Grafiken einfach leer (keine 0-Werte)."""
+    farbe_kg = "#2a78d6"
+    farbe_sys = "#0b0b0b"
+
+    fig, (ax_kg, ax_sys) = plt.subplots(
+        2, 1, figsize=(13, 7), sharex=True, gridspec_kw={"height_ratios": [1, 1.3]}
+    )
+    fig.patch.set_facecolor("#fcfcfb")
+
+    ax_kg.bar(df.index, df["Kg"], color=farbe_kg, width=1.0, label="Kg", zorder=3)
+    ax_kg.set_ylabel("Kg")
+    ax_kg.set_facecolor("#fcfcfb")
+    ax_kg.legend(loc="upper left", frameon=False)
+    ax_kg.spines[["top", "right"]].set_visible(False)
+    ax_kg.spines[["left", "bottom"]].set_color("#c3c2b7")
+    ax_kg.grid(axis="y", color="#e1e0d9", linewidth=0.8)
+    if df["Kg"].notna().any():
+        kg_min, kg_max = df["Kg"].min(), df["Kg"].max()
+        spanne = max(kg_max - kg_min, 1.0)
+        ax_kg.set_ylim(kg_min - spanne * 0.2, kg_max + spanne * 0.2)
+    ax_kg.set_title("Körpergewicht (Kg)", loc="left", color="#0b0b0b", fontsize=12, pad=10)
+
+    sys_min = df["SYS"].min() if df["SYS"].notna().any() else 90.0
+    sys_max = df["SYS"].max() if df["SYS"].notna().any() else 180.0
+    for b in sys_bereiche:
+        untere = b["von"] if np.isfinite(b["von"]) else sys_min - 10
+        obere = b["bis"] if np.isfinite(b["bis"]) else sys_max + 10
+        ax_sys.axhspan(untere, obere, color=b["farbe"], alpha=0.22, zorder=0, label=b["label"])
+
+    ax_sys.plot(df.index, df["SYS"], color=farbe_sys, linewidth=2, marker="o", markersize=3,
+                label="SYS", zorder=3)
+    ax_sys.set_ylabel("SYS")
+    ax_sys.set_facecolor("#fcfcfb")
+    ax_sys.spines[["top", "right"]].set_visible(False)
+    ax_sys.spines[["left", "bottom"]].set_color("#c3c2b7")
+    ax_sys.grid(axis="y", color="#e1e0d9", linewidth=0.8)
+    ax_sys.set_ylim(sys_min - 10, sys_max + 10)
+    ax_sys.set_title("Blutdruck systolisch (SYS) mit Bewertungsbereichen", loc="left",
+                      color="#0b0b0b", fontsize=12, pad=10)
+
+    handles, labels = ax_sys.get_legend_handles_labels()
+    ax_sys.legend(handles, labels, loc="upper left", frameon=False, fontsize=9, ncol=1)
+
+    ax_sys.xaxis.set_major_locator(mdates.AutoDateLocator())
+    ax_sys.xaxis.set_major_formatter(mdates.DateFormatter("%d.%m.%Y"))
+    fig.autofmt_xdate()
+    fig.tight_layout()
+    return fig
+
+
 # =====================================================================
 # Sidebar: Einstellungen
 # =====================================================================
@@ -921,6 +985,11 @@ else:
             m2.metric("ATL (Fatigue)", f"{letzter_tag['ATL']:.1f}")
             m3.metric("TSB (Form)", f"{letzter_tag['TSB']:.1f}")
             m4.metric("Bereich", letzter_tag["TSB_Bereich"])
+
+            if ergebnis["Kg"].notna().any() or ergebnis["SYS"].notna().any():
+                st.subheader("Körpergewicht (Kg) & Blutdruck systolisch (SYS)")
+                fig_kg_sys = plot_kg_sys(ergebnis, SYS_BEREICHE)
+                st.pyplot(fig_kg_sys, width="stretch")
 
             rohdaten = df_kombiniert[
                 (pd.to_datetime(df_kombiniert["Datum"]).dt.date >= start_datum)
