@@ -837,7 +837,7 @@ with col_manuell:
         with fc1:
             neues_datum = st.date_input("Datum", value=dt.date.today(), format="DD.MM.YYYY")
         with fc2:
-            neue_dauer = st.time_input("Trainingszeit (hh:mm)", value=dt.time(1, 0), step=60)
+            neue_dauer = st.time_input("Zeit", value=dt.time(1, 0), step=60)
         with fc3:
             neuer_tss = st.number_input("TSS", min_value=0.0, step=1.0, value=0.0)
 
@@ -1032,7 +1032,7 @@ else:
             # genau einer Dezimalen als Text formatiert (garantiert
             # einheitliche Darstellung), Datum als tt.mm.jjjj.
             ergebnis_anzeige = ergebnis.copy()
-            ergebnis_anzeige["Trainingszeit (hh:mm)"] = ergebnis_anzeige["Dauer_min"].apply(minuten_zu_hhmm)
+            ergebnis_anzeige["Zeit"] = ergebnis_anzeige["Dauer_min"].apply(minuten_zu_hhmm)
             ergebnis_anzeige["Training"] = ergebnis_anzeige["Training"].fillna("")
             for _spalte in ["TSS", "ATL", "CTL", "TSB"]:
                 ergebnis_anzeige[_spalte] = ergebnis_anzeige[_spalte].apply(lambda v: f"{v:.1f}")
@@ -1042,7 +1042,7 @@ else:
             ergebnis_anzeige.index = ergebnis_anzeige.index.strftime("%d.%m.%Y")
             ergebnis_anzeige.index.name = "Datum"
             ergebnis_anzeige = ergebnis_anzeige[
-                ["Training", "Trainingszeit (hh:mm)", "TSS", "ATL", "CTL", "TSB", "TSB-Bereich",
+                ["Training", "Zeit", "TSS", "ATL", "CTL", "TSB", "TSB-Bereich",
                  "Kg", "SYS", "DIA", "Puls"]
             ]
 
@@ -1057,7 +1057,7 @@ else:
                 [{
                     "Datum": "Summe",
                     "Training": "–",
-                    "Trainingszeit (hh:mm)": summe_dauer,
+                    "Zeit": summe_dauer,
                     "TSS": summe_tss,
                     "ATL": "–",
                     "CTL": "–",
@@ -1094,7 +1094,7 @@ else:
             rohdaten_export = rohdaten_export.rename(columns={"Dauer": "Trainingszeit (hh:mm)"})
 
             ergebnis_export = ergebnis.copy()
-            ergebnis_export["Trainingszeit (hh:mm)"] = ergebnis_export["Dauer_min"] / (24 * 60)
+            ergebnis_export["Zeit"] = ergebnis_export["Dauer_min"] / (24 * 60)
             ergebnis_export = ergebnis_export.rename(columns={"TSB_Bereich": "TSB-Bereich"})
             ergebnis_export.index = ergebnis_export.index.strftime("%d.%m.%Y")
             ergebnis_export.index.name = "Datum"
@@ -1108,7 +1108,7 @@ else:
             ergebnis_export.to_excel(excel_puffer, sheet_name="Tagesauswertung")
 
             _excel_zeit_zahl_formate = {
-                "Trainingszeit (hh:mm)": "[hh]:mm",
+                "Zeit": "[hh]:mm",
                 "TSS": "0.0", "ATL": "0.0", "CTL": "0.0", "TSB": "0.0",
                 "Kg": "0.0", "SYS": "0.0", "DIA": "0.0", "Puls": "0.0",
             }
