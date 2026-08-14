@@ -1060,9 +1060,16 @@ else:
             )
             st.caption("Die Zeilenfarbe entspricht dem TSB-Bereich des jeweiligen Tages (gleiche Farben wie die Zonen im TSB-Diagramm oben).")
 
+            # Für den Excel-Export der Tagesauswertung Komma statt Punkt als
+            # Dezimalzeichen verwenden (deutsches Zahlenformat); die
+            # Bildschirmanzeige oben bleibt davon unberührt.
+            ergebnis_export = ergebnis_anzeige.copy()
+            for _spalte in ["TSS", "ATL", "CTL", "TSB", "Kg", "SYS", "DIA", "Puls"]:
+                ergebnis_export[_spalte] = ergebnis_export[_spalte].astype(str).str.replace(".", ",", regex=False)
+
             excel_puffer = pd.ExcelWriter("ergebnis_export.xlsx", engine="openpyxl")
             rohdaten_anzeige.to_excel(excel_puffer, sheet_name="Trainingseinheiten", index=False)
-            ergebnis_anzeige.to_excel(excel_puffer, sheet_name="Tagesauswertung")
+            ergebnis_export.to_excel(excel_puffer, sheet_name="Tagesauswertung")
             excel_puffer.close()
             with open("ergebnis_export.xlsx", "rb") as f:
                 st.download_button(
