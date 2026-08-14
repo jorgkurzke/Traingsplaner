@@ -668,21 +668,21 @@ with col_import:
                 dauer_index = dauer_optionen.index(dauer_default) if dauer_default else 0
                 spalte_dauer = st.selectbox("Spalte mit Trainingszeit (optional, hh:mm)", dauer_optionen, index=dauer_index)
 
-            st.caption("Optional: Spalten für Training, Kg, SYS, DIA, Puls zuordnen (falls in der Excel-Datei vorhanden):")
-            d1, d2, d3, d4, d5 = st.columns(5)
-            optionen = ["(keine)"] + spalten
-            with d1:
-                spalte_training = st.selectbox(
-                    "Spalte mit Training", optionen, index=optionen.index(training_default) if training_default else 0
-                )
-            with d2:
-                spalte_kg = st.selectbox("Spalte mit Kg", optionen, index=optionen.index(kg_default) if kg_default else 0)
-            with d3:
-                spalte_sys = st.selectbox("Spalte mit SYS", optionen, index=optionen.index(sys_default) if sys_default else 0)
-            with d4:
-                spalte_dia = st.selectbox("Spalte mit DIA", optionen, index=optionen.index(dia_default) if dia_default else 0)
-            with d5:
-                spalte_puls = st.selectbox("Spalte mit Puls", optionen, index=optionen.index(puls_default) if puls_default else 0)
+            with st.expander("Weitere optionale Spalten zuordnen (Training, Kg, SYS, DIA, Puls)"):
+                d1, d2, d3, d4, d5 = st.columns(5)
+                optionen = ["(keine)"] + spalten
+                with d1:
+                    spalte_training = st.selectbox(
+                        "Training", optionen, index=optionen.index(training_default) if training_default else 0
+                    )
+                with d2:
+                    spalte_kg = st.selectbox("Kg", optionen, index=optionen.index(kg_default) if kg_default else 0)
+                with d3:
+                    spalte_sys = st.selectbox("SYS", optionen, index=optionen.index(sys_default) if sys_default else 0)
+                with d4:
+                    spalte_dia = st.selectbox("DIA", optionen, index=optionen.index(dia_default) if dia_default else 0)
+                with d5:
+                    spalte_puls = st.selectbox("Puls", optionen, index=optionen.index(puls_default) if puls_default else 0)
 
             df_import = df_roh[[spalte_datum, spalte_tss]].rename(columns={spalte_datum: "Datum", spalte_tss: "TSS"})
             if spalte_dauer != "(keine)":
