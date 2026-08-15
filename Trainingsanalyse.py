@@ -466,9 +466,12 @@ def hex_zu_rgba(hex_farbe, alpha=0.28):
     return f"rgba({r},{g},{b},{alpha})"
 
 
-def zeilen_nach_tsb_bereich_faerben(tabelle, bereiche_eff):
+def zeilen_nach_tsb_bereich_faerben(tabelle, bereiche_eff, spalten=None):
     """Gibt einen pandas Styler zurück, der jede Zeile passend zu ihrem
-    TSB-Bereich einfärbt (gleiche Farben wie im Diagramm)."""
+    TSB-Bereich einfärbt (gleiche Farben wie im Diagramm). Über 'spalten'
+    kann die Einfärbung auf eine Teilmenge der Spalten eingeschränkt werden
+    (z.B. nur "Training" bis "TSB-Bereich"), statt die komplette Zeile zu
+    färben."""
     farb_map = dict(zip(bereiche_eff["label"], bereiche_eff["farbe"])) if len(bereiche_eff) > 0 else {}
 
     def zeile_stylen(zeile):
@@ -477,7 +480,37 @@ def zeilen_nach_tsb_bereich_faerben(tabelle, bereiche_eff):
             return [f"background-color: {hex_zu_rgba(farbe)}"] * len(zeile)
         return [""] * len(zeile)
 
-    return tabelle.style.apply(zeile_stylen, axis=1)
+    styler = tabelle.style
+    if spalten is not None:
+        return styler.apply(zeile_stylen, axis=1, subset=spalten)
+    return styler.apply(zeile_stylen, axis=1)
+
+
+def bereich_farbe_zuordnen(wert, bereiche_eff):
+    """Liefert die Hex-Farbe des Bereichs, in den 'wert' fällt (oder None,
+    wenn kein Bereich passt bzw. der Wert fehlt)."""
+    if pd.isna(wert):
+        return None
+    for b in bereiche_eff:
+        if b["von"] <= wert < b["bis"]:
+            return b["farbe"]
+    return None
+
+
+def spalte_nach_bereichen_faerben(styler, spaltenname, werte_numerisch, bereiche_eff):
+    """Färbt die Zellen EINER Spalte anhand numerischer Werte (in gleicher
+    Zeilenreihenfolge wie die angezeigte Tabelle) gemäß den übergebenen
+    Bereichen ein - unabhängig von einer eventuellen zeilenweisen Färbung
+    (z.B. Kombination aus TSB-Zeilenfarbe + SYS-Spaltenfarbe)."""
+    werte_liste = list(werte_numerisch)
+
+    def _spalte_stylen(_spalte_werte):
+        return [
+            f"background-color: {hex_zu_rgba(farbe)}" if (farbe := bereich_farbe_zuordnen(wert, bereiche_eff)) else ""
+            for wert in werte_liste
+        ]
+
+    return styler.apply(_spalte_stylen, axis=0, subset=[spaltenname])
 
 
 def _text_werte_zusammenfassen(werte):
@@ -1142,11 +1175,19 @@ else:
                 }]
             )
             st.dataframe(summenzeile, width="stretch", hide_index=True)
-            st.dataframe(
-                zeilen_nach_tsb_bereich_faerben(ergebnis_anzeige, bereiche_eff),
-                width="stretch",
+            _tagesauswertung_styler = zeilen_nach_tsb_bereich_faerben(
+                ergebnis_anzeige, bereiche_eff,
+                spalten=["Training", "Trainingszeit (hh:mm)", "TSS", "ATL", "CTL", "TSB", "TSB-Bereich"],
             )
-            st.caption("Die Zeilenfarbe entspricht dem TSB-Bereich des jeweiligen Tages (gleiche Farben wie die Zonen im TSB-Diagramm oben).")
+            _tagesauswertung_styler = spalte_nach_bereichen_faerben(
+                _tagesauswertung_styler, "SYS", ergebnis["SYS"], SYS_BEREICHE
+            )
+            st.dataframe(_tagesauswertung_styler, width="stretch")
+            st.caption(
+                "Die Zeilenfarbe (Spalten Training bis TSB-Bereich) entspricht dem TSB-Bereich des "
+                "jeweiligen Tages (gleiche Farben wie die Zonen im TSB-Diagramm oben). Die SYS-Spalte "
+                "ist zusätzlich nach den SYS-Bewertungsbereichen eingefärbt."
+            )
 
             # Für den Excel-Export bewusst die ROHEN (numerischen) Daten
             # verwenden statt der Text-formatierten Anzeige-Tabellen, damit
