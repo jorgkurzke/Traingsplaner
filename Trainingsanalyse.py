@@ -83,6 +83,16 @@ SYS_BEREICHE = [
     {"von": 159.0, "bis": np.inf, "label": "SYS > 159", "farbe": "#d03b3b"},
 ]
 
+# Feste Auswahlliste für die Quelle des FTP-Wertes (manuelle Eingabe).
+FTP_QUELLE_OPTIONEN = [
+    "Garmin",
+    "TrainerRoad",
+    "sonstige Trainer-App",
+    "20min Test",
+    "Rampentest",
+    "sonstiges",
+]
+
 
 st.set_page_config(page_title="Trainingsanalyse: ATL / CTL / TSB", layout="wide")
 st.title("Trainingsanalyse: ATL / CTL / TSB")
@@ -849,8 +859,9 @@ with col_import:
             importierte_anzeige["Datum"] = pd.to_datetime(importierte_anzeige["Datum"]).dt.strftime("%d.%m.%Y")
             importierte_anzeige["Dauer"] = importierte_anzeige["Dauer"].apply(dauer_anzeige)
             importierte_anzeige["TSS"] = importierte_anzeige["TSS"].apply(lambda v: f"{v:.1f}")
-            for _spalte in ["Kg", "SYS", "DIA", "Puls", "FTP"]:
+            for _spalte in ["Kg", "SYS", "DIA", "Puls"]:
                 importierte_anzeige[_spalte] = importierte_anzeige[_spalte].apply(zahl_anzeige)
+            importierte_anzeige["FTP"] = importierte_anzeige["FTP"].apply(lambda v: zahl_anzeige(v, 0))
             importierte_anzeige["Training"] = importierte_anzeige["Training"].fillna("")
             importierte_anzeige["FTP-Quelle"] = importierte_anzeige["FTP-Quelle"].fillna("")
             importierte_anzeige = importierte_anzeige.rename(columns={"Dauer": "Trainingszeit (hh:mm)"})
@@ -875,9 +886,9 @@ with col_manuell:
         with fc1:
             neues_datum = st.date_input("Datum", value=dt.date.today(), format="DD.MM.YYYY")
         with fc2:
-            neues_ftp = st.number_input("FTP", min_value=0.0, step=1.0, value=0.0)
+            neues_ftp = st.number_input("FTP", min_value=0.0, step=1.0, value=0.0, format="%.0f")
         with fc3:
-            neue_ftp_quelle = st.text_input("FTP-Quelle", value="")
+            neue_ftp_quelle = st.selectbox("FTP-Quelle", ["(keine)"] + FTP_QUELLE_OPTIONEN, index=0)
 
         fc4, fc5 = st.columns(2)
         with fc4:
@@ -906,7 +917,7 @@ with col_manuell:
             [{
                 "Datum": pd.Timestamp(neues_datum),
                 "FTP": neues_ftp if neues_ftp > 0 else np.nan,
-                "FTP-Quelle": neue_ftp_quelle.strip() if neue_ftp_quelle else None,
+                "FTP-Quelle": neue_ftp_quelle if neue_ftp_quelle != "(keine)" else None,
                 "Dauer": neue_dauer_hhmm,
                 "TSS": neuer_tss,
                 "Training": neues_training.strip() if neues_training else None,
@@ -931,8 +942,8 @@ with col_manuell:
         width="stretch",
         column_config={
             "Datum": st.column_config.DateColumn("Datum", format="DD.MM.YYYY"),
-            "FTP": st.column_config.NumberColumn("FTP", step=1.0),
-            "FTP-Quelle": st.column_config.TextColumn("FTP-Quelle"),
+            "FTP": st.column_config.NumberColumn("FTP", step=1.0, format="%.0f"),
+            "FTP-Quelle": st.column_config.SelectboxColumn("FTP-Quelle", options=FTP_QUELLE_OPTIONEN),
             "Dauer": st.column_config.TextColumn(
                 "Trainingsdauer (hh:mm)", help="Format hh:mm, z.B. 1:30 für 1 Stunde 30 Minuten"
             ),
@@ -1068,8 +1079,9 @@ else:
             rohdaten_anzeige = rohdaten.copy()
             rohdaten_anzeige["Dauer"] = rohdaten_anzeige["Dauer"].apply(dauer_anzeige)
             rohdaten_anzeige["TSS"] = rohdaten_anzeige["TSS"].apply(lambda v: f"{v:.1f}")
-            for _spalte in ["Kg", "SYS", "DIA", "Puls", "FTP"]:
+            for _spalte in ["Kg", "SYS", "DIA", "Puls"]:
                 rohdaten_anzeige[_spalte] = rohdaten_anzeige[_spalte].apply(zahl_anzeige)
+            rohdaten_anzeige["FTP"] = rohdaten_anzeige["FTP"].apply(lambda v: zahl_anzeige(v, 0))
             rohdaten_anzeige["Training"] = rohdaten_anzeige["Training"].fillna("")
             rohdaten_anzeige["FTP-Quelle"] = rohdaten_anzeige["FTP-Quelle"].fillna("")
             rohdaten_anzeige["Datum"] = pd.to_datetime(rohdaten_anzeige["Datum"]).dt.strftime("%d.%m.%Y")
@@ -1093,8 +1105,9 @@ else:
             ergebnis_anzeige["FTP-Quelle"] = ergebnis_anzeige["FTP-Quelle"].fillna("")
             for _spalte in ["TSS", "ATL", "CTL", "TSB"]:
                 ergebnis_anzeige[_spalte] = ergebnis_anzeige[_spalte].apply(lambda v: f"{v:.1f}")
-            for _spalte in ["Kg", "SYS", "DIA", "Puls", "FTP"]:
+            for _spalte in ["Kg", "SYS", "DIA", "Puls"]:
                 ergebnis_anzeige[_spalte] = ergebnis_anzeige[_spalte].apply(zahl_anzeige)
+            ergebnis_anzeige["FTP"] = ergebnis_anzeige["FTP"].apply(lambda v: zahl_anzeige(v, 0))
             ergebnis_anzeige = ergebnis_anzeige.rename(columns={"TSB_Bereich": "TSB-Bereich"})
             ergebnis_anzeige.index = ergebnis_anzeige.index.strftime("%d.%m.%Y")
             ergebnis_anzeige.index.name = "Datum"
@@ -1113,7 +1126,7 @@ else:
             summenzeile = pd.DataFrame(
                 [{
                     "Datum": "Summe",
-                    "FTP": zahl_anzeige(ergebnis["FTP"].mean()),
+                    "FTP": zahl_anzeige(ergebnis["FTP"].mean(), 0),
                     "FTP-Quelle": "–",
                     "Training": "–",
                     "Trainingszeit (hh:mm)": summe_dauer,
@@ -1173,7 +1186,7 @@ else:
             _excel_zeit_zahl_formate = {
                 "Trainingszeit (hh:mm)": "[hh]:mm",
                 "TSS": "0.0", "ATL": "0.0", "CTL": "0.0", "TSB": "0.0",
-                "Kg": "0.0", "SYS": "0.0", "DIA": "0.0", "Puls": "0.0", "FTP": "0.0",
+                "Kg": "0.0", "SYS": "0.0", "DIA": "0.0", "Puls": "0.0", "FTP": "0",
             }
             _excel_zahlenformate_setzen(excel_puffer.sheets["Trainingseinheiten"], _excel_zeit_zahl_formate)
             _excel_zahlenformate_setzen(excel_puffer.sheets["Tagesauswertung"], _excel_zeit_zahl_formate)
