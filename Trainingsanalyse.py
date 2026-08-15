@@ -103,6 +103,8 @@ def leere_eintraege():
     return pd.DataFrame(
         {
             "Datum": pd.Series(dtype="datetime64[ns]"),
+            "FTP": pd.Series(dtype="float"),
+            "FTP-Quelle": pd.Series(dtype="object"),
             "Dauer": pd.Series(dtype="object"),
             "TSS": pd.Series(dtype="float"),
             "Training": pd.Series(dtype="object"),
@@ -176,9 +178,10 @@ def _onedrive_datei_schreiben(pfad, inhalt_bytes, content_type="application/octe
 
 def _eintraege_normalisieren(df):
     """Stellt sicher, dass eine geladene Tabelle immer die Spalten
-    Datum/Dauer/TSS/Training/Kg/SYS/DIA/Puls enthält (schützt vor Abstürzen
-    bei älteren oder von Hand bearbeiteten gespeicherten Dateien, denen z.B.
-    die Dauer-Spalte oder die später hinzugekommenen Spalten fehlen)."""
+    Datum/FTP/FTP-Quelle/Dauer/TSS/Training/Kg/SYS/DIA/Puls enthält (schützt
+    vor Abstürzen bei älteren oder von Hand bearbeiteten gespeicherten
+    Dateien, denen z.B. die Dauer-Spalte oder die später hinzugekommenen
+    Spalten fehlen)."""
     df = df.copy()
     if "Dauer" not in df.columns:
         df["Dauer"] = None
@@ -186,11 +189,13 @@ def _eintraege_normalisieren(df):
         df["TSS"] = 0.0
     if "Training" not in df.columns:
         df["Training"] = None
-    for _spalte in ["Kg", "SYS", "DIA", "Puls"]:
+    if "FTP-Quelle" not in df.columns:
+        df["FTP-Quelle"] = None
+    for _spalte in ["Kg", "SYS", "DIA", "Puls", "FTP"]:
         if _spalte not in df.columns:
             df[_spalte] = np.nan
     df["Datum"] = pd.to_datetime(df["Datum"])
-    return df[["Datum", "Dauer", "TSS", "Training", "Kg", "SYS", "DIA", "Puls"]]
+    return df[["Datum", "FTP", "FTP-Quelle", "Dauer", "TSS", "Training", "Kg", "SYS", "DIA", "Puls"]]
 
 
 def importierte_daten_laden():
@@ -297,6 +302,8 @@ if "manuelle_eintraege" not in st.session_state:
     st.session_state.manuelle_eintraege = pd.DataFrame(
         {
             "Datum": pd.Series(dtype="datetime64[ns]"),
+            "FTP": pd.Series(dtype="float"),
+            "FTP-Quelle": pd.Series(dtype="object"),
             "Dauer": pd.Series(dtype="object"),  # Trainingsdauer als datetime.time (hh:mm)
             "TSS": pd.Series(dtype="float"),
             "Training": pd.Series(dtype="object"),
@@ -463,29 +470,32 @@ def zeilen_nach_tsb_bereich_faerben(tabelle, bereiche_eff):
     return tabelle.style.apply(zeile_stylen, axis=1)
 
 
-def _training_zusammenfassen(werte):
-    """Fasst mehrere Trainingsbezeichnungen desselben Tages zusammen (z.B.
-    zwei Einheiten am selben Tag) - eindeutige, nicht-leere Werte, mit
-    ' + ' verbunden."""
+def _text_werte_zusammenfassen(werte):
+    """Fasst mehrere Textwerte desselben Tages zusammen (z.B. Training oder
+    FTP-Quelle bei zwei Einheiten am selben Tag) - eindeutige, nicht-leere
+    Werte, mit ' + ' verbunden."""
     eindeutig = [str(w).strip() for w in werte if pd.notna(w) and str(w).strip() != ""]
     eindeutig = list(dict.fromkeys(eindeutig))  # Reihenfolge erhalten, Duplikate entfernen
     return " + ".join(eindeutig)
 
 
 def tagesreihe_aufbauen(df_tss):
-    """Nimmt ein DataFrame mit Spalten Datum/Dauer/TSS/Training/Kg/SYS/DIA/
-    Puls, summiert bzw. mittelt Mehrfacheinträge pro Tag und füllt fehlende
-    Tage mit TSS=0/Dauer=0 (lückenlose Tagesreihe - wichtig, damit ATL/CTL
-    bei Trainingspausen korrekt abklingen). Kg/SYS/DIA/Puls werden bei
-    fehlenden Tagen NICHT mit 0 aufgefüllt (bleiben leer/NaN), da es sich
-    um Messwerte und keine kumulierbaren Belastungsgrößen handelt."""
+    """Nimmt ein DataFrame mit Spalten Datum/FTP/FTP-Quelle/Dauer/TSS/
+    Training/Kg/SYS/DIA/Puls, summiert bzw. mittelt Mehrfacheinträge pro Tag
+    und füllt fehlende Tage mit TSS=0/Dauer=0 (lückenlose Tagesreihe -
+    wichtig, damit ATL/CTL bei Trainingspausen korrekt abklingen).
+    Kg/SYS/DIA/Puls/FTP werden bei fehlenden Tagen NICHT mit 0 aufgefüllt
+    (bleiben leer/NaN), da es sich um Messwerte und keine kumulierbaren
+    Belastungsgrößen handelt."""
     df = df_tss.dropna(subset=["Datum"]).copy()
     df["Datum"] = pd.to_datetime(df["Datum"])
     df["TSS"] = pd.to_numeric(df["TSS"], errors="coerce").fillna(0)
     df["Dauer_min"] = df["Dauer"].apply(dauer_zu_minuten) if "Dauer" in df.columns else 0.0
     if "Training" not in df.columns:
         df["Training"] = None
-    for _spalte in ["Kg", "SYS", "DIA", "Puls"]:
+    if "FTP-Quelle" not in df.columns:
+        df["FTP-Quelle"] = None
+    for _spalte in ["Kg", "SYS", "DIA", "Puls", "FTP"]:
         if _spalte not in df.columns:
             df[_spalte] = np.nan
         else:
@@ -495,17 +505,22 @@ def tagesreihe_aufbauen(df_tss):
     tag_gruppe = df.groupby("Datum").agg(
         TSS=("TSS", "sum"),
         Dauer_min=("Dauer_min", "sum"),
-        Training=("Training", _training_zusammenfassen),
+        Training=("Training", _text_werte_zusammenfassen),
         Kg=("Kg", "mean"),
         SYS=("SYS", "mean"),
         DIA=("DIA", "mean"),
         Puls=("Puls", "mean"),
+        FTP=("FTP", "mean"),
     ).sort_index()
+    # "FTP-Quelle" separat behandeln, da ein Spaltenname mit Bindestrich in
+    # der obigen Keyword-Aggregation (Name=(...)) syntaktisch nicht erlaubt ist.
+    tag_gruppe["FTP-Quelle"] = df.groupby("Datum")["FTP-Quelle"].agg(_text_werte_zusammenfassen)
     alle_tage = pd.date_range(tag_gruppe.index.min(), tag_gruppe.index.max(), freq="D")
     tag_gruppe = tag_gruppe.reindex(alle_tage)
     tag_gruppe["TSS"] = tag_gruppe["TSS"].fillna(0)
     tag_gruppe["Dauer_min"] = tag_gruppe["Dauer_min"].fillna(0)
     tag_gruppe["Training"] = tag_gruppe["Training"].fillna("")
+    tag_gruppe["FTP-Quelle"] = tag_gruppe["FTP-Quelle"].fillna("")
     tag_gruppe.index.name = "Datum"
     return tag_gruppe
 
@@ -736,6 +751,14 @@ with col_import:
             sys_default = next((c for c in spalten if "sys" in str(c).lower()), None)
             dia_default = next((c for c in spalten if "dia" in str(c).lower()), None)
             puls_default = next((c for c in spalten if "puls" in str(c).lower() or "pulse" in str(c).lower() or "hr" in str(c).lower()), None)
+            ftp_default = next(
+                (c for c in spalten if "ftp" in str(c).lower() and "quelle" not in str(c).lower() and "source" not in str(c).lower()),
+                None,
+            )
+            ftp_quelle_default = next(
+                (c for c in spalten if "ftp" in str(c).lower() and ("quelle" in str(c).lower() or "source" in str(c).lower())),
+                None,
+            )
 
             c1, c2, c3 = st.columns(3)
             with c1:
@@ -747,9 +770,18 @@ with col_import:
                 dauer_index = dauer_optionen.index(dauer_default) if dauer_default else 0
                 spalte_dauer = st.selectbox("Spalte mit Trainingszeit (optional, hh:mm)", dauer_optionen, index=dauer_index)
 
+            st.caption("Optional: Spalten für FTP und FTP-Quelle zuordnen (falls in der Excel-Datei vorhanden):")
+            e1, e2 = st.columns(2)
+            optionen = ["(keine)"] + spalten
+            with e1:
+                spalte_ftp = st.selectbox("Spalte mit FTP", optionen, index=optionen.index(ftp_default) if ftp_default else 0)
+            with e2:
+                spalte_ftp_quelle = st.selectbox(
+                    "Spalte mit FTP-Quelle", optionen, index=optionen.index(ftp_quelle_default) if ftp_quelle_default else 0
+                )
+
             st.caption("Optional: Spalten für Training, Kg, SYS, DIA, Puls zuordnen (falls in der Excel-Datei vorhanden):")
             d1, d2, d3, d4, d5 = st.columns(5)
-            optionen = ["(keine)"] + spalten
             with d1:
                 spalte_training = st.selectbox(
                     "Spalte mit Training", optionen, index=optionen.index(training_default) if training_default else 0
@@ -769,6 +801,8 @@ with col_import:
             else:
                 df_import["Dauer"] = None
             for _ziel, _quelle in [
+                ("FTP", spalte_ftp),
+                ("FTP-Quelle", spalte_ftp_quelle),
                 ("Training", spalte_training),
                 ("Kg", spalte_kg),
                 ("SYS", spalte_sys),
@@ -815,10 +849,14 @@ with col_import:
             importierte_anzeige["Datum"] = pd.to_datetime(importierte_anzeige["Datum"]).dt.strftime("%d.%m.%Y")
             importierte_anzeige["Dauer"] = importierte_anzeige["Dauer"].apply(dauer_anzeige)
             importierte_anzeige["TSS"] = importierte_anzeige["TSS"].apply(lambda v: f"{v:.1f}")
-            for _spalte in ["Kg", "SYS", "DIA", "Puls"]:
+            for _spalte in ["Kg", "SYS", "DIA", "Puls", "FTP"]:
                 importierte_anzeige[_spalte] = importierte_anzeige[_spalte].apply(zahl_anzeige)
             importierte_anzeige["Training"] = importierte_anzeige["Training"].fillna("")
-            importierte_anzeige = importierte_anzeige.rename(columns={"Dauer": "Zeit"})
+            importierte_anzeige["FTP-Quelle"] = importierte_anzeige["FTP-Quelle"].fillna("")
+            importierte_anzeige = importierte_anzeige.rename(columns={"Dauer": "Trainingszeit (hh:mm)"})
+            importierte_anzeige = importierte_anzeige[
+                ["Datum", "FTP", "FTP-Quelle", "Trainingszeit (hh:mm)", "TSS", "Training", "Kg", "SYS", "DIA", "Puls"]
+            ]
             st.dataframe(importierte_anzeige, width="stretch", hide_index=True)
             if st.button("Gespeicherte Import-Daten löschen", width="stretch"):
                 st.session_state.importierte_eintraege = leere_eintraege()
@@ -837,21 +875,27 @@ with col_manuell:
         with fc1:
             neues_datum = st.date_input("Datum", value=dt.date.today(), format="DD.MM.YYYY")
         with fc2:
-            neue_dauer = st.time_input("Zeit", value=dt.time(1, 0), step=60)
+            neues_ftp = st.number_input("FTP", min_value=0.0, step=1.0, value=0.0)
         with fc3:
+            neue_ftp_quelle = st.text_input("FTP-Quelle", value="")
+
+        fc4, fc5 = st.columns(2)
+        with fc4:
+            neue_dauer = st.time_input("Trainingszeit (hh:mm)", value=dt.time(1, 0), step=60)
+        with fc5:
             neuer_tss = st.number_input("TSS", min_value=0.0, step=1.0, value=0.0)
 
         st.caption("Optional: Training, Körpergewicht und Blutdruck/Puls:")
-        fc4, fc5, fc6, fc7, fc8 = st.columns(5)
-        with fc4:
-            neues_training = st.text_input("Training", value="")
-        with fc5:
-            neues_kg = st.number_input("Kg", min_value=0.0, step=0.1, value=0.0, format="%.1f")
+        fc6, fc7, fc8, fc9, fc10 = st.columns(5)
         with fc6:
-            neuer_sys = st.number_input("SYS", min_value=0.0, step=1.0, value=0.0)
+            neues_training = st.text_input("Training", value="")
         with fc7:
-            neuer_dia = st.number_input("DIA", min_value=0.0, step=1.0, value=0.0)
+            neues_kg = st.number_input("Kg", min_value=0.0, step=0.1, value=0.0, format="%.1f")
         with fc8:
+            neuer_sys = st.number_input("SYS", min_value=0.0, step=1.0, value=0.0)
+        with fc9:
+            neuer_dia = st.number_input("DIA", min_value=0.0, step=1.0, value=0.0)
+        with fc10:
             neuer_puls = st.number_input("Puls", min_value=0.0, step=1.0, value=0.0)
 
         abgeschickt = st.form_submit_button("Einheit hinzufügen", width="stretch")
@@ -861,6 +905,8 @@ with col_manuell:
         neue_zeile = pd.DataFrame(
             [{
                 "Datum": pd.Timestamp(neues_datum),
+                "FTP": neues_ftp if neues_ftp > 0 else np.nan,
+                "FTP-Quelle": neue_ftp_quelle.strip() if neue_ftp_quelle else None,
                 "Dauer": neue_dauer_hhmm,
                 "TSS": neuer_tss,
                 "Training": neues_training.strip() if neues_training else None,
@@ -885,6 +931,8 @@ with col_manuell:
         width="stretch",
         column_config={
             "Datum": st.column_config.DateColumn("Datum", format="DD.MM.YYYY"),
+            "FTP": st.column_config.NumberColumn("FTP", step=1.0),
+            "FTP-Quelle": st.column_config.TextColumn("FTP-Quelle"),
             "Dauer": st.column_config.TextColumn(
                 "Trainingsdauer (hh:mm)", help="Format hh:mm, z.B. 1:30 für 1 Stunde 30 Minuten"
             ),
@@ -895,7 +943,7 @@ with col_manuell:
             "DIA": st.column_config.NumberColumn("DIA", step=1.0),
             "Puls": st.column_config.NumberColumn("Puls", step=1.0),
         },
-        column_order=["Datum", "Dauer", "TSS", "Training", "Kg", "SYS", "DIA", "Puls"],
+        column_order=["Datum", "FTP", "FTP-Quelle", "Dauer", "TSS", "Training", "Kg", "SYS", "DIA", "Puls"],
         key="manuelle_eintraege_editor",
     )
 
@@ -941,6 +989,7 @@ else:
         st.subheader("Zeitraum")
         ZEITRAUM_OPTIONEN = [
             "Aktuelles Jahr",
+            "Letzte 12 Monate",
             "Letzte 6 Monate",
             "Letzte 3 Monate",
             "Letzte 6 Wochen",
@@ -948,11 +997,14 @@ else:
             "Freie Eingabe",
         ]
         zeitraum_wahl = st.selectbox(
-            "Anzeigezeitraum (Diagramm & Auswertung)", ZEITRAUM_OPTIONEN, index=4
+            "Anzeigezeitraum (Diagramm & Auswertung)", ZEITRAUM_OPTIONEN,
+            index=ZEITRAUM_OPTIONEN.index("Letzte 6 Wochen"),
         )
 
         if zeitraum_wahl == "Aktuelles Jahr":
             start_datum, end_datum = dt.date(heute.year, 1, 1), heute
+        elif zeitraum_wahl == "Letzte 12 Monate":
+            start_datum, end_datum = monate_subtrahieren(heute, 12), heute
         elif zeitraum_wahl == "Letzte 6 Monate":
             start_datum, end_datum = monate_subtrahieren(heute, 6), heute
         elif zeitraum_wahl == "Letzte 3 Monate":
@@ -1011,53 +1063,60 @@ else:
                 & (pd.to_datetime(df_kombiniert["Datum"]).dt.date <= end_datum)
             ].copy()
             rohdaten = rohdaten.sort_values(["Datum", "Dauer"])[
-                ["Datum", "Training", "Dauer", "TSS", "Kg", "SYS", "DIA", "Puls"]
+                ["Datum", "FTP", "FTP-Quelle", "Training", "Dauer", "TSS", "Kg", "SYS", "DIA", "Puls"]
             ]
             rohdaten_anzeige = rohdaten.copy()
             rohdaten_anzeige["Dauer"] = rohdaten_anzeige["Dauer"].apply(dauer_anzeige)
             rohdaten_anzeige["TSS"] = rohdaten_anzeige["TSS"].apply(lambda v: f"{v:.1f}")
-            for _spalte in ["Kg", "SYS", "DIA", "Puls"]:
+            for _spalte in ["Kg", "SYS", "DIA", "Puls", "FTP"]:
                 rohdaten_anzeige[_spalte] = rohdaten_anzeige[_spalte].apply(zahl_anzeige)
             rohdaten_anzeige["Training"] = rohdaten_anzeige["Training"].fillna("")
+            rohdaten_anzeige["FTP-Quelle"] = rohdaten_anzeige["FTP-Quelle"].fillna("")
             rohdaten_anzeige["Datum"] = pd.to_datetime(rohdaten_anzeige["Datum"]).dt.strftime("%d.%m.%Y")
-            rohdaten_anzeige = rohdaten_anzeige.rename(columns={"Dauer": "Zeit"})
+            rohdaten_anzeige = rohdaten_anzeige.rename(columns={"Dauer": "Trainingszeit (hh:mm)"})
+            rohdaten_anzeige = rohdaten_anzeige[
+                ["Datum", "FTP", "FTP-Quelle", "Training", "Trainingszeit (hh:mm)", "TSS", "Kg", "SYS", "DIA", "Puls"]
+            ]
             with st.expander("Erfasste Trainingseinheiten", expanded=False):
                 st.dataframe(rohdaten_anzeige, width="stretch", hide_index=True)
 
             st.subheader("Tagesauswertung (ATL / CTL / TSB)")
 
             # Spalten in der vom Nutzer festgelegten Reihenfolge aufbauen:
-            # Datum, Training, Trainingszeit, TSS, ATL, CTL, TSB,
-            # TSB-Bereich, Kg, SYS, DIA, Puls. TSS/ATL/CTL/TSB jeweils mit
-            # genau einer Dezimalen als Text formatiert (garantiert
-            # einheitliche Darstellung), Datum als tt.mm.jjjj.
+            # Datum, FTP, FTP-Quelle, Training, Trainingszeit, TSS, ATL,
+            # CTL, TSB, TSB-Bereich, Kg, SYS, DIA, Puls. TSS/ATL/CTL/TSB
+            # jeweils mit genau einer Dezimalen als Text formatiert
+            # (garantiert einheitliche Darstellung), Datum als tt.mm.jjjj.
             ergebnis_anzeige = ergebnis.copy()
-            ergebnis_anzeige["Zeit"] = ergebnis_anzeige["Dauer_min"].apply(minuten_zu_hhmm)
+            ergebnis_anzeige["Trainingszeit (hh:mm)"] = ergebnis_anzeige["Dauer_min"].apply(minuten_zu_hhmm)
             ergebnis_anzeige["Training"] = ergebnis_anzeige["Training"].fillna("")
+            ergebnis_anzeige["FTP-Quelle"] = ergebnis_anzeige["FTP-Quelle"].fillna("")
             for _spalte in ["TSS", "ATL", "CTL", "TSB"]:
                 ergebnis_anzeige[_spalte] = ergebnis_anzeige[_spalte].apply(lambda v: f"{v:.1f}")
-            for _spalte in ["Kg", "SYS", "DIA", "Puls"]:
+            for _spalte in ["Kg", "SYS", "DIA", "Puls", "FTP"]:
                 ergebnis_anzeige[_spalte] = ergebnis_anzeige[_spalte].apply(zahl_anzeige)
             ergebnis_anzeige = ergebnis_anzeige.rename(columns={"TSB_Bereich": "TSB-Bereich"})
             ergebnis_anzeige.index = ergebnis_anzeige.index.strftime("%d.%m.%Y")
             ergebnis_anzeige.index.name = "Datum"
             ergebnis_anzeige = ergebnis_anzeige[
-                ["Training", "Zeit", "TSS", "ATL", "CTL", "TSB", "TSB-Bereich",
+                ["FTP", "FTP-Quelle", "Training", "Trainingszeit (hh:mm)", "TSS", "ATL", "CTL", "TSB", "TSB-Bereich",
                  "Kg", "SYS", "DIA", "Puls"]
             ]
 
             # Fixierte Summenzeile oberhalb der (scrollbaren) Tabelle - eine
             # echte "frozen row" innerhalb einer einzelnen Tabelle bietet
             # Streamlit nicht an, daher als eigene, nicht scrollende Zeile
-            # direkt über der Tabelle dargestellt. Kg/SYS/DIA/Puls werden
-            # hier als Mittelwerte (nicht Summen) ausgewiesen.
+            # direkt über der Tabelle dargestellt. Kg/SYS/DIA/Puls/FTP
+            # werden hier als Mittelwerte (nicht Summen) ausgewiesen.
             summe_dauer = minuten_zu_hhmm(ergebnis["Dauer_min"].sum())
             summe_tss = f"{ergebnis['TSS'].sum():.1f}"
             summenzeile = pd.DataFrame(
                 [{
                     "Datum": "Summe",
+                    "FTP": zahl_anzeige(ergebnis["FTP"].mean()),
+                    "FTP-Quelle": "–",
                     "Training": "–",
-                    "Zeit": summe_dauer,
+                    "Trainingszeit (hh:mm)": summe_dauer,
                     "TSS": summe_tss,
                     "ATL": "–",
                     "CTL": "–",
@@ -1087,19 +1146,23 @@ else:
             rohdaten_export = rohdaten.copy()
             rohdaten_export["Dauer"] = rohdaten_export["Dauer"].apply(dauer_zu_minuten) / (24 * 60)
             rohdaten_export["TSS"] = pd.to_numeric(rohdaten_export["TSS"], errors="coerce")
-            for _spalte in ["Kg", "SYS", "DIA", "Puls"]:
+            for _spalte in ["Kg", "SYS", "DIA", "Puls", "FTP"]:
                 rohdaten_export[_spalte] = pd.to_numeric(rohdaten_export[_spalte], errors="coerce")
             rohdaten_export["Training"] = rohdaten_export["Training"].fillna("")
+            rohdaten_export["FTP-Quelle"] = rohdaten_export["FTP-Quelle"].fillna("")
             rohdaten_export["Datum"] = pd.to_datetime(rohdaten_export["Datum"]).dt.strftime("%d.%m.%Y")
-            rohdaten_export = rohdaten_export.rename(columns={"Dauer": "Zeit"})
+            rohdaten_export = rohdaten_export.rename(columns={"Dauer": "Trainingszeit (hh:mm)"})
+            rohdaten_export = rohdaten_export[
+                ["Datum", "FTP", "FTP-Quelle", "Training", "Trainingszeit (hh:mm)", "TSS", "Kg", "SYS", "DIA", "Puls"]
+            ]
 
             ergebnis_export = ergebnis.copy()
-            ergebnis_export["Zeit"] = ergebnis_export["Dauer_min"] / (24 * 60)
+            ergebnis_export["Trainingszeit (hh:mm)"] = ergebnis_export["Dauer_min"] / (24 * 60)
             ergebnis_export = ergebnis_export.rename(columns={"TSB_Bereich": "TSB-Bereich"})
             ergebnis_export.index = ergebnis_export.index.strftime("%d.%m.%Y")
             ergebnis_export.index.name = "Datum"
             ergebnis_export = ergebnis_export[
-                ["Training", "Zeit", "TSS", "ATL", "CTL", "TSB", "TSB-Bereich",
+                ["FTP", "FTP-Quelle", "Training", "Trainingszeit (hh:mm)", "TSS", "ATL", "CTL", "TSB", "TSB-Bereich",
                  "Kg", "SYS", "DIA", "Puls"]
             ]
 
@@ -1108,9 +1171,9 @@ else:
             ergebnis_export.to_excel(excel_puffer, sheet_name="Tagesauswertung")
 
             _excel_zeit_zahl_formate = {
-                "Zeit": "[hh]:mm",
+                "Trainingszeit (hh:mm)": "[hh]:mm",
                 "TSS": "0.0", "ATL": "0.0", "CTL": "0.0", "TSB": "0.0",
-                "Kg": "0.0", "SYS": "0.0", "DIA": "0.0", "Puls": "0.0",
+                "Kg": "0.0", "SYS": "0.0", "DIA": "0.0", "Puls": "0.0", "FTP": "0.0",
             }
             _excel_zahlenformate_setzen(excel_puffer.sheets["Trainingseinheiten"], _excel_zeit_zahl_formate)
             _excel_zahlenformate_setzen(excel_puffer.sheets["Tagesauswertung"], _excel_zeit_zahl_formate)
