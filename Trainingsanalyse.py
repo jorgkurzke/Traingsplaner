@@ -205,6 +205,14 @@ def _eintraege_normalisieren(df):
         if _spalte not in df.columns:
             df[_spalte] = np.nan
     df["Datum"] = pd.to_datetime(df["Datum"])
+    # Text-Spalten IMMER als object-Dtype erzwingen: Ist eine Spalte (z.B.
+    # nach einem Neustart/CSV-Reload) komplett leer, erkennt pandas sie
+    # sonst als float64 (NaN) statt als Text - das bringt den editierbaren
+    # data_editor unten zum Absturz, da dessen TextColumn-Konfiguration
+    # dann nicht zum erkannten Spaltentyp passt.
+    for _spalte in ["Dauer", "Training", "FTP-Quelle"]:
+        df[_spalte] = df[_spalte].astype(object)
+        df[_spalte] = df[_spalte].where(df[_spalte].notna(), None)
     return df[["Datum", "FTP", "FTP-Quelle", "Dauer", "TSS", "Training", "Kg", "SYS", "DIA", "Puls"]]
 
 
@@ -867,12 +875,9 @@ with col_import:
                 # Datenbestand speichern. Das verhindert doppelte/mehrfach
                 # auftauchende Tage, die durch ein Zusammenführen mit dem
                 # alten Bestand entstehen könnten.
-                kombiniert = (
+                kombiniert = _eintraege_normalisieren(
                     df_import.dropna(subset=["Datum"])
-                    .assign(Datum=lambda d: pd.to_datetime(d["Datum"]))
-                    .sort_values("Datum")
-                    .reset_index(drop=True)
-                )
+                ).sort_values("Datum").reset_index(drop=True)
 
                 st.session_state.importierte_eintraege = kombiniert
                 in_onedrive_gespeichert = importierte_daten_speichern(kombiniert)
@@ -888,27 +893,53 @@ with col_import:
 
     if len(st.session_state.importierte_eintraege) > 0:
         with st.expander(f"Gespeicherte Import-Daten verwalten ({len(st.session_state.importierte_eintraege)} Zeilen)"):
-            importierte_anzeige = st.session_state.importierte_eintraege.copy()
-            importierte_anzeige["Datum"] = pd.to_datetime(importierte_anzeige["Datum"]).dt.strftime("%d.%m.%Y")
-            importierte_anzeige["Dauer"] = importierte_anzeige["Dauer"].apply(dauer_anzeige)
-            importierte_anzeige["TSS"] = importierte_anzeige["TSS"].apply(lambda v: f"{v:.1f}")
-            for _spalte in ["Kg", "SYS", "DIA", "Puls"]:
-                importierte_anzeige[_spalte] = importierte_anzeige[_spalte].apply(zahl_anzeige)
-            importierte_anzeige["FTP"] = importierte_anzeige["FTP"].apply(lambda v: zahl_anzeige(v, 0))
-            importierte_anzeige["Training"] = importierte_anzeige["Training"].fillna("")
-            importierte_anzeige["FTP-Quelle"] = importierte_anzeige["FTP-Quelle"].fillna("")
-            importierte_anzeige = importierte_anzeige.rename(columns={"Dauer": "Trainingszeit (hh:mm)"})
-            importierte_anzeige = importierte_anzeige[
-                ["Datum", "FTP", "FTP-Quelle", "Trainingszeit (hh:mm)", "TSS", "Training", "Kg", "SYS", "DIA", "Puls"]
-            ]
-            st.dataframe(importierte_anzeige, width="stretch", hide_index=True)
-            if st.button("Gespeicherte Import-Daten löschen", width="stretch"):
-                st.session_state.importierte_eintraege = leere_eintraege()
-                importierte_daten_speichern(leere_eintraege())  # überschreibt OneDrive/lokale Datei mit leerer Tabelle
-                if os.path.exists(GESPEICHERTE_IMPORT_DATEI):
-                    os.remove(GESPEICHERTE_IMPORT_DATEI)
-                st.success("Gespeicherte Import-Daten gelöscht.")
-                st.rerun()
+            st.caption(
+                "Werte direkt in der Tabelle bearbeiten oder Zeilen über '+'/Papierkorb "
+                "hinzufügen bzw. löschen. Änderungen werden erst mit dem Button unten "
+                "dauerhaft gespeichert."
+            )
+            st.session_state.importierte_eintraege = st.data_editor(
+                st.session_state.importierte_eintraege,
+                num_rows="dynamic",
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "Datum": st.column_config.DateColumn("Datum", format="DD.MM.YYYY"),
+                    "FTP": st.column_config.NumberColumn("FTP", step=1.0, format="%.0f"),
+                    "FTP-Quelle": st.column_config.TextColumn("FTP-Quelle"),
+                    "Dauer": st.column_config.TextColumn(
+                        "Trainingsdauer (hh:mm)", help="Format hh:mm, z.B. 1:30 für 1 Stunde 30 Minuten"
+                    ),
+                    "TSS": st.column_config.NumberColumn("TSS", min_value=0.0, step=1.0),
+                    "Training": st.column_config.TextColumn("Training"),
+                    "Kg": st.column_config.NumberColumn("Kg", step=0.1, format="%.1f"),
+                    "SYS": st.column_config.NumberColumn("SYS", step=1.0),
+                    "DIA": st.column_config.NumberColumn("DIA", step=1.0),
+                    "Puls": st.column_config.NumberColumn("Puls", step=1.0),
+                },
+                column_order=["Datum", "FTP", "FTP-Quelle", "Dauer", "TSS", "Training", "Kg", "SYS", "DIA", "Puls"],
+                key="importierte_eintraege_editor",
+            )
+
+            b1, b2 = st.columns(2)
+            with b1:
+                if st.button("Änderungen an gespeicherten Daten speichern", width="stretch"):
+                    bereinigt = _eintraege_normalisieren(
+                        st.session_state.importierte_eintraege.dropna(subset=["Datum"])
+                    ).sort_values("Datum").reset_index(drop=True)
+                    st.session_state.importierte_eintraege = bereinigt
+                    in_onedrive_gespeichert = importierte_daten_speichern(bereinigt)
+                    ziel = "OneDrive" if in_onedrive_gespeichert else "der App (lokal, ohne OneDrive-Einrichtung)"
+                    st.success(f"Änderungen in {ziel} gespeichert.")
+                    st.rerun()
+            with b2:
+                if st.button("Gespeicherte Import-Daten löschen", width="stretch"):
+                    st.session_state.importierte_eintraege = leere_eintraege()
+                    importierte_daten_speichern(leere_eintraege())  # überschreibt OneDrive/lokale Datei mit leerer Tabelle
+                    if os.path.exists(GESPEICHERTE_IMPORT_DATEI):
+                        os.remove(GESPEICHERTE_IMPORT_DATEI)
+                    st.success("Gespeicherte Import-Daten gelöscht.")
+                    st.rerun()
 
 with col_manuell:
     st.subheader("2. Manuelle Eingabe")
