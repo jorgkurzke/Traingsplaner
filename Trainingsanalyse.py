@@ -204,7 +204,16 @@ def _eintraege_normalisieren(df):
     for _spalte in ["Kg", "SYS", "DIA", "Puls", "FTP"]:
         if _spalte not in df.columns:
             df[_spalte] = np.nan
-    df["Datum"] = pd.to_datetime(df["Datum"])
+    df["Datum"] = pd.to_datetime(df["Datum"], errors="coerce")
+    # Numerische Spalten IMMER robust in float umwandeln (auch bei
+    # Text-Resten oder Komma-Dezimaltrennzeichen aus älteren/von Hand
+    # bearbeiteten Dateien) - sonst erkennt pandas die Spalte ggf. als
+    # object/Text, was mit der NumberColumn-Konfiguration im data_editor
+    # kollidiert und die App zum Absturz bringt.
+    for _spalte in ["TSS", "Kg", "SYS", "DIA", "Puls", "FTP"]:
+        if df[_spalte].dtype == object:
+            df[_spalte] = df[_spalte].astype(str).str.strip().str.replace(",", ".", regex=False)
+        df[_spalte] = pd.to_numeric(df[_spalte], errors="coerce")
     # Text-Spalten IMMER als object-Dtype erzwingen: Ist eine Spalte (z.B.
     # nach einem Neustart/CSV-Reload) komplett leer, erkennt pandas sie
     # sonst als float64 (NaN) statt als Text - das bringt den editierbaren
@@ -213,6 +222,7 @@ def _eintraege_normalisieren(df):
     for _spalte in ["Dauer", "Training", "FTP-Quelle"]:
         df[_spalte] = df[_spalte].astype(object)
         df[_spalte] = df[_spalte].where(df[_spalte].notna(), None)
+        df[_spalte] = df[_spalte].apply(lambda v: str(v) if v is not None else None)
     return df[["Datum", "FTP", "FTP-Quelle", "Dauer", "TSS", "Training", "Kg", "SYS", "DIA", "Puls"]]
 
 
@@ -460,6 +470,35 @@ def zahl_anzeige(wert, nachkommastellen=1):
     except (TypeError, ValueError):
         pass
     return f"{float(wert):.{nachkommastellen}f}"
+
+
+def sicherer_data_editor(df, column_config, column_order, key, num_rows="dynamic", hide_index=True):
+    """Ruft st.data_editor auf. Falls Streamlit dabei einen Typkonflikt
+    zwischen den Spaltendaten und der column_config feststellt (z.B. weil
+    eine ältere gespeicherte Datei trotz Normalisierung noch eine
+    unerwartete Dateninkonsistenz enthält), fängt diese Funktion den
+    Fehler ab und zeigt die Tabelle stattdessen als einfache, bearbeitbare
+    Text-Tabelle an - damit stürzt die App nie mehr komplett ab, sondern
+    bleibt nutzbar und die Werte lassen sich reparieren."""
+    try:
+        return st.data_editor(
+            df, num_rows=num_rows, width="stretch", hide_index=hide_index,
+            column_config=column_config, column_order=column_order, key=key,
+        )
+    except Exception:
+        st.warning(
+            "Für diese Tabelle wurde ein Datentyp-Konflikt in den gespeicherten "
+            "Werten festgestellt. Die Werte werden vorübergehend als Text "
+            "angezeigt und bearbeitbar gemacht - bitte danach über den "
+            "Speichern-Button unten sichern, um das Problem dauerhaft zu beheben."
+        )
+        text_df = df.copy()
+        for _spalte in text_df.columns:
+            text_df[_spalte] = text_df[_spalte].apply(lambda v: "" if pd.isna(v) else str(v))
+        return st.data_editor(
+            text_df, num_rows=num_rows, width="stretch", hide_index=hide_index,
+            column_order=column_order, key=f"{key}_fallback",
+        )
 
 
 def hex_zu_rgba(hex_farbe, alpha=0.28):
@@ -907,11 +946,8 @@ with col_import:
             st.session_state.importierte_eintraege = _eintraege_normalisieren(
                 st.session_state.importierte_eintraege
             )
-            st.session_state.importierte_eintraege = st.data_editor(
+            st.session_state.importierte_eintraege = sicherer_data_editor(
                 st.session_state.importierte_eintraege,
-                num_rows="dynamic",
-                width="stretch",
-                hide_index=True,
                 column_config={
                     "Datum": st.column_config.DateColumn("Datum", format="DD.MM.YYYY"),
                     "FTP": st.column_config.NumberColumn("FTP", step=1.0, format="%.0f"),
@@ -1012,10 +1048,8 @@ with col_manuell:
     # Spaltentypen vor jedem Rendern erzwingen (siehe Kommentar beim
     # importierte_eintraege-Editor oben - gleiches Risiko hier).
     st.session_state.manuelle_eintraege = _eintraege_normalisieren(st.session_state.manuelle_eintraege)
-    st.session_state.manuelle_eintraege = st.data_editor(
+    st.session_state.manuelle_eintraege = sicherer_data_editor(
         st.session_state.manuelle_eintraege,
-        num_rows="dynamic",
-        width="stretch",
         column_config={
             "Datum": st.column_config.DateColumn("Datum", format="DD.MM.YYYY"),
             "FTP": st.column_config.NumberColumn("FTP", step=1.0, format="%.0f"),
@@ -1032,6 +1066,7 @@ with col_manuell:
         },
         column_order=["Datum", "FTP", "FTP-Quelle", "Dauer", "TSS", "Training", "Kg", "SYS", "DIA", "Puls"],
         key="manuelle_eintraege_editor",
+        hide_index=False,
     )
 
 
