@@ -898,6 +898,15 @@ with col_import:
                 "hinzufügen bzw. löschen. Änderungen werden erst mit dem Button unten "
                 "dauerhaft gespeichert."
             )
+            # Vor JEDEM Rendern des Editors die Spaltentypen erzwingen (nicht
+            # nur beim Laden/Speichern) - der data_editor selbst kann beim
+            # Bearbeiten (z.B. neue leere Zeile, alle Werte einer Textspalte
+            # gelöscht) eine Spalte in float64/NaN "zurückkippen", was beim
+            # nächsten Rerun zum Absturz führt, weil die column_config dann
+            # nicht mehr zum erkannten Spaltentyp passt.
+            st.session_state.importierte_eintraege = _eintraege_normalisieren(
+                st.session_state.importierte_eintraege
+            )
             st.session_state.importierte_eintraege = st.data_editor(
                 st.session_state.importierte_eintraege,
                 num_rows="dynamic",
@@ -1000,6 +1009,9 @@ with col_manuell:
         )
 
     st.caption("Vorhandene manuelle Einträge bearbeiten oder löschen (Zeilen über '+'/Papierkorb unten):")
+    # Spaltentypen vor jedem Rendern erzwingen (siehe Kommentar beim
+    # importierte_eintraege-Editor oben - gleiches Risiko hier).
+    st.session_state.manuelle_eintraege = _eintraege_normalisieren(st.session_state.manuelle_eintraege)
     st.session_state.manuelle_eintraege = st.data_editor(
         st.session_state.manuelle_eintraege,
         num_rows="dynamic",
