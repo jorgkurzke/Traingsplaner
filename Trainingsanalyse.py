@@ -56,6 +56,12 @@ GESPEICHERTE_IMPORT_DATEI = "gespeicherte_importe.csv"
 # verzeichnis, damit kein Ordner vorab angelegt werden muss).
 ONEDRIVE_DATEIPFAD = "/me/drive/root:/gespeicherte_importe_trainingsplaner.csv"
 
+# Genauso für die MANUELL erfassten Trainingseinheiten - eigene Datei,
+# damit sie unabhängig von den importierten Daten dauerhaft gespeichert
+# werden (bisher gingen manuelle Einträge beim Neuladen der App verloren).
+GESPEICHERTE_MANUELL_DATEI = "gespeicherte_manuelle_eintraege.csv"
+ONEDRIVE_MANUELL_PFAD = "/me/drive/root:/gespeicherte_manuelle_eintraege_trainingsplaner.csv"
+
 # Einstellungen (Zeitkonstanten, Startwerte, TSB-Bereiche) - werden
 # zusammen mit den Trainingsdaten gespeichert, ebenfalls im OneDrive-
 # Wurzelverzeichnis bzw. lokal als Rückfall.
@@ -226,44 +232,71 @@ def _eintraege_normalisieren(df):
     return df[["Datum", "FTP", "FTP-Quelle", "Dauer", "TSS", "Training", "Kg", "SYS", "DIA", "Puls"]]
 
 
-def importierte_daten_laden():
-    """Lädt zuvor gespeicherte Import-Daten - aus OneDrive, falls
-    eingerichtet, sonst als Rückfall aus einer lokalen Datei."""
+def _eintraege_laden(onedrive_pfad, lokale_datei, fehlermeldung_praefix):
+    """Generische Lade-Funktion für eine Trainingsdaten-Tabelle (Import
+    oder manuelle Einträge) - aus OneDrive, falls eingerichtet, sonst als
+    Rückfall aus einer lokalen Datei."""
     if onedrive_konfiguriert():
         try:
-            inhalt = _onedrive_datei_lesen(ONEDRIVE_DATEIPFAD)
+            inhalt = _onedrive_datei_lesen(onedrive_pfad)
             if inhalt is None:
                 return leere_eintraege()
             return _eintraege_normalisieren(pd.read_csv(io.BytesIO(inhalt)))
         except Exception as e:
-            st.warning(f"Gespeicherte Daten konnten nicht aus OneDrive geladen werden ({e}).")
+            st.warning(f"{fehlermeldung_praefix} konnten nicht aus OneDrive geladen werden ({e}).")
             return leere_eintraege()
 
-    if os.path.exists(GESPEICHERTE_IMPORT_DATEI):
+    if os.path.exists(lokale_datei):
         try:
-            return _eintraege_normalisieren(pd.read_csv(GESPEICHERTE_IMPORT_DATEI))
+            return _eintraege_normalisieren(pd.read_csv(lokale_datei))
         except Exception:
             pass
     return leere_eintraege()
 
 
-def importierte_daten_speichern(df):
-    """Schreibt die aktuellen Import-Daten dauerhaft weg - nach OneDrive,
-    falls eingerichtet, sonst als Rückfall in eine lokale Datei (übersteht
-    dann nur Reruns/Schlafmodus, kein Neu-Deployment)."""
+def _eintraege_speichern(df, onedrive_pfad, lokale_datei):
+    """Generische Speicher-Funktion für eine Trainingsdaten-Tabelle (Import
+    oder manuelle Einträge) - nach OneDrive, falls eingerichtet, sonst als
+    Rückfall in eine lokale Datei (übersteht dann nur Reruns/Schlafmodus,
+    kein Neu-Deployment)."""
     if onedrive_konfiguriert():
         try:
             puffer = io.StringIO()
             df.to_csv(puffer, index=False)
-            _onedrive_datei_schreiben(ONEDRIVE_DATEIPFAD, puffer.getvalue().encode("utf-8"), "text/csv")
+            _onedrive_datei_schreiben(onedrive_pfad, puffer.getvalue().encode("utf-8"), "text/csv")
             return True
         except Exception as e:
             st.error(
                 f"Speichern in OneDrive fehlgeschlagen ({e}). Die Daten wurden "
                 "stattdessen nur lokal gespeichert (übersteht kein Neu-Deployment)."
             )
-    df.to_csv(GESPEICHERTE_IMPORT_DATEI, index=False)
+    df.to_csv(lokale_datei, index=False)
     return False
+
+
+def importierte_daten_laden():
+    """Lädt zuvor gespeicherte Import-Daten - aus OneDrive, falls
+    eingerichtet, sonst als Rückfall aus einer lokalen Datei."""
+    return _eintraege_laden(ONEDRIVE_DATEIPFAD, GESPEICHERTE_IMPORT_DATEI, "Gespeicherte Import-Daten")
+
+
+def importierte_daten_speichern(df):
+    """Schreibt die aktuellen Import-Daten dauerhaft weg - nach OneDrive,
+    falls eingerichtet, sonst als Rückfall in eine lokale Datei (übersteht
+    dann nur Reruns/Schlafmodus, kein Neu-Deployment)."""
+    return _eintraege_speichern(df, ONEDRIVE_DATEIPFAD, GESPEICHERTE_IMPORT_DATEI)
+
+
+def manuelle_daten_laden():
+    """Lädt zuvor gespeicherte MANUELLE Einträge - aus OneDrive, falls
+    eingerichtet, sonst als Rückfall aus einer lokalen Datei."""
+    return _eintraege_laden(ONEDRIVE_MANUELL_PFAD, GESPEICHERTE_MANUELL_DATEI, "Gespeicherte manuelle Einträge")
+
+
+def manuelle_daten_speichern(df):
+    """Schreibt die aktuellen manuellen Einträge dauerhaft weg - nach
+    OneDrive, falls eingerichtet, sonst als Rückfall in eine lokale Datei."""
+    return _eintraege_speichern(df, ONEDRIVE_MANUELL_PFAD, GESPEICHERTE_MANUELL_DATEI)
 
 
 def einstellungen_laden():
@@ -327,20 +360,7 @@ if "importierte_eintraege" not in st.session_state:
     st.session_state.importierte_eintraege = importierte_daten_laden()
 
 if "manuelle_eintraege" not in st.session_state:
-    st.session_state.manuelle_eintraege = pd.DataFrame(
-        {
-            "Datum": pd.Series(dtype="datetime64[ns]"),
-            "FTP": pd.Series(dtype="float"),
-            "FTP-Quelle": pd.Series(dtype="object"),
-            "Dauer": pd.Series(dtype="object"),  # Trainingsdauer als datetime.time (hh:mm)
-            "TSS": pd.Series(dtype="float"),
-            "Training": pd.Series(dtype="object"),
-            "Kg": pd.Series(dtype="float"),
-            "SYS": pd.Series(dtype="float"),
-            "DIA": pd.Series(dtype="float"),
-            "Puls": pd.Series(dtype="float"),
-        }
-    )
+    st.session_state.manuelle_eintraege = manuelle_daten_laden()
 
 if "einstellungen" not in st.session_state:
     st.session_state.einstellungen = einstellungen_laden()
@@ -989,6 +1009,15 @@ with col_import:
 with col_manuell:
     st.subheader("2. Manuelle Eingabe")
 
+    if onedrive_konfiguriert():
+        st.caption("OneDrive-Speicherung aktiv.")
+    else:
+        st.caption(
+            "OneDrive ist noch nicht eingerichtet (siehe ONEDRIVE_EINRICHTUNG.md) - "
+            "manuelle Einträge werden bis dahin nur lokal auf der App-Festplatte "
+            "zwischengespeichert (übersteht kein Neu-Deployment)."
+        )
+
     with st.form("neue_einheit_formular", clear_on_submit=True):
         st.caption("Neue Trainingseinheit erfassen (mit Datum, Trainingszeit und TSS):")
         fc1, fc2, fc3 = st.columns(3)
@@ -1036,12 +1065,14 @@ with col_manuell:
                 "Puls": neuer_puls if neuer_puls > 0 else np.nan,
             }]
         )
-        st.session_state.manuelle_eintraege = pd.concat(
+        st.session_state.manuelle_eintraege = _eintraege_normalisieren(pd.concat(
             [st.session_state.manuelle_eintraege, neue_zeile], ignore_index=True
-        )
+        ))
+        in_onedrive_gespeichert = manuelle_daten_speichern(st.session_state.manuelle_eintraege)
+        ziel = "OneDrive" if in_onedrive_gespeichert else "der App (lokal, ohne OneDrive-Einrichtung)"
         st.success(
             f"Einheit am {neues_datum.strftime('%d.%m.%Y')} "
-            f"({neue_dauer_hhmm} h) hinzugefügt."
+            f"({neue_dauer_hhmm} h) hinzugefügt und in {ziel} gespeichert."
         )
 
     st.caption("Vorhandene manuelle Einträge bearbeiten oder löschen (Zeilen über '+'/Papierkorb unten):")
@@ -1068,6 +1099,26 @@ with col_manuell:
         key="manuelle_eintraege_editor",
         hide_index=False,
     )
+
+    mb1, mb2 = st.columns(2)
+    with mb1:
+        if st.button("Änderungen an manuellen Einträgen speichern", width="stretch"):
+            manuell_bereinigt = _eintraege_normalisieren(
+                st.session_state.manuelle_eintraege.dropna(subset=["Datum"])
+            ).sort_values("Datum").reset_index(drop=True)
+            st.session_state.manuelle_eintraege = manuell_bereinigt
+            in_onedrive_gespeichert = manuelle_daten_speichern(manuell_bereinigt)
+            ziel = "OneDrive" if in_onedrive_gespeichert else "der App (lokal, ohne OneDrive-Einrichtung)"
+            st.success(f"Änderungen in {ziel} gespeichert.")
+            st.rerun()
+    with mb2:
+        if st.button("Gespeicherte manuelle Einträge löschen", width="stretch"):
+            st.session_state.manuelle_eintraege = leere_eintraege()
+            manuelle_daten_speichern(leere_eintraege())  # überschreibt OneDrive/lokale Datei mit leerer Tabelle
+            if os.path.exists(GESPEICHERTE_MANUELL_DATEI):
+                os.remove(GESPEICHERTE_MANUELL_DATEI)
+            st.success("Gespeicherte manuelle Einträge gelöscht.")
+            st.rerun()
 
 
 # =====================================================================
